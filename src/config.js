@@ -6,7 +6,7 @@ export function loadConfig() {
     "http://187.77.101.57:59180"
   ).replace(/\/$/, "");
   const webUrl = (process.env.PREDICTBET_WEB_URL || apiUrl).replace(/\/$/, "");
-  const adminPort = Number(process.env.ADMIN_PORT || 8788);
+  const adminPort = Number(process.env.PORT || process.env.ADMIN_PORT || 8788);
   const publicUrl = (process.env.PUBLIC_URL || `http://127.0.0.1:${adminPort}`).replace(/\/$/, "");
   return {
     token,
