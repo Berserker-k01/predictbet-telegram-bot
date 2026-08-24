@@ -54,10 +54,14 @@ export function initialSession() {
     lang: "fr",
     token: null,
     user: null,
+    userId: null,
+    loggedIn: false,
     flow: null,
     pendingEmail: null,
+    pendingName: null,
     pendingRef: null,
     notif: true,
     reminded: {},
+    view: { screen: "menu", scope: "today", league: "", page: 0, matchId: "", from: "menu" },
   };
 }

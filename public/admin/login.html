@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Connexion · Predictbet Admin</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=Outfit:wght@600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/admin/admin.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-card">
+      <div class="login-brand">
+        <span class="logo-mark">P</span>
+        <div>
+          <h1>Predictbet</h1>
+          <p>Panel admin · users, plans, Tchin</p>
+        </div>
+      </div>
+      <form id="form">
+        <label>Email<input id="email" type="email" autocomplete="username" required placeholder="admin@predictbet.app" /></label>
+        <label>Mot de passe<input id="password" type="password" autocomplete="current-password" required /></label>
+        <p id="err" class="error" hidden></p>
+        <button type="submit">Entrer</button>
+      </form>
+    </main>
+    <script src="/admin/login.js"></script>
+  </body>
+</html>

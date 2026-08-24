@@ -1,3 +1,9 @@
+export function extractAuth(data = {}) {
+  const token = data.token || data.accessToken || data.jwt || data.data?.token || null;
+  const user = data.user || data.data?.user || null;
+  return { token, user };
+}
+
 export class ApiError extends Error {
   constructor(message, status = 500, code = null) {
     super(message);
@@ -20,7 +26,11 @@ export function createApi(config) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
-      throw new ApiError(data.error || res.statusText, res.status, data.code);
+      throw new ApiError(
+        data.error || data.message || res.statusText || `HTTP ${res.status}`,
+        res.status,
+        data.code,
+      );
     }
     return data;
   }
@@ -28,6 +38,7 @@ export function createApi(config) {
   return {
     health: () => request("/api/health"),
     telegramAuth: (payload) => request("/api/auth/telegram", { method: "POST", body: payload }),
+    login: (payload) => request("/api/auth/login", { method: "POST", body: payload }),
     me: (token) => request("/api/auth/me", { token }),
     matches: (params = {}) => {
       const q = new URLSearchParams();

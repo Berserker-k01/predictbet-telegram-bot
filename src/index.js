@@ -1,38 +1,74 @@
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+import { randomBytes } from "crypto";
 import "./load-env.js";
 import { Bot } from "grammy";
 import { loadConfig } from "./config.js";
-import { createApi, ApiError } from "./api.js";
+import { createApi, ApiError, extractAuth } from "./api.js";
 import { createSessionStore, initialSession } from "./session-store.js";
+import { createStore } from "./store.js";
+import { createTchin } from "./tchin.js";
+import { startHttpServer } from "./http-server.js";
+import { sleep, signals } from "./analysis.js";
 import { t } from "./i18n.js";
+import { resolveStadium, resolveReferee } from "./venues.js";
 import {
   esc,
   upcoming,
-  isLocked,
-  pickLabel,
   whenText,
   paginate,
   priceLabel,
+  findMatch,
+  pctBar,
+  listEntry,
 } from "./format.js";
 import {
+  filterMatches,
+  sortMatches,
+  stats,
+  neighbors,
+  defaultView,
+  pickOutcome,
+} from "./catalog.js";
+import {
   mainKeyboard,
-  matchListKeyboard,
+  menuKeyboard,
+  leaguesKeyboard,
+  listKeyboard,
   matchDetailKeyboard,
   profileKeyboard,
   langKeyboard,
   plansKeyboard,
   payKeyboard,
+  welcomeKeyboard,
 } from "./keyboards.js";
 
 const config = loadConfig();
 if (!config.token) {
-  console.error("TELEGRAM_BOT_TOKEN manquant. Copiez telegram-bot/.env.example");
+  console.error("TELEGRAM_BOT_TOKEN manquant. Copiez .env.example vers .env");
   process.exit(1);
 }
 
 const api = createApi(config);
 const sessions = createSessionStore(config.sessionFile);
+const store = createStore(config.storeFile, {
+  adminEmail: config.adminEmail,
+  adminPassword: config.adminPassword,
+});
 const bot = new Bot(config.token);
+const tchin = createTchin(config, store, {
+  onPaid: async (payment) => {
+    const tgId = Number(payment?.metadata?.telegramId);
+    if (!tgId) return;
+    const plan = store.getPlan(payment.planId) || store.getPlan(payment.planCode);
+    const lang = payment.metadata?.lang === "en" ? "en" : "fr";
+    await bot.api.sendMessage(tgId, t(lang, "payFree", { plan: esc(plan?.name || "") }), {
+      parse_mode: "HTML",
+    });
+  },
+});
 let botUsername = "";
+let matchCache = { at: 0, list: [] };
 
 function sess(ctx) {
   const id = ctx.from?.id;
@@ -44,11 +80,82 @@ function langOf(ctx) {
   return sess(ctx).lang || "fr";
 }
 
+function loggedIn(s) {
+  return Boolean(s?.loggedIn && s?.userId);
+}
+
+function registeredUserFor(ctx) {
+  const u = store.getUser(ctx.from?.id);
+  if (!u || u.role === "admin" || !u.registered) return null;
+  return u;
+}
+
+function openLocalSession(ctx, user) {
+  sessions.patch(ctx.from.id, {
+    loggedIn: true,
+    userId: user.id,
+    user: sess(ctx).user || user,
+    token: sess(ctx).token || null,
+    flow: null,
+    pendingEmail: null,
+    pendingName: null,
+  });
+  store.touchUser(user.id);
+  return sessions.get(ctx.from.id);
+}
+
+function autoLoginFromTelegram(ctx) {
+  if (loggedIn(sess(ctx))) return sess(ctx);
+  const u = registeredUserFor(ctx);
+  if (!u) return null;
+  return openLocalSession(ctx, u);
+}
+
+function currentUser(ctx) {
+  const s = sess(ctx);
+  if (!loggedIn(s)) return null;
+  return store.getUser(s.userId) || store.getUser(ctx.from?.id);
+}
+
+function isAuthFlow(flow) {
+  return String(flow || "").startsWith("register_") || String(flow || "").startsWith("login_");
+}
+
+function authErrorText(lang, e) {
+  const keys = {
+    INVALID_NAME: "nameBad",
+    INVALID_EMAIL: "emailBad",
+    INVALID_PASSWORD: "passBad",
+    EMAIL_TAKEN: "regEmailTaken",
+    ALREADY_REGISTERED: "regAlready",
+    LOGIN_BAD: "loginBad",
+    TELEGRAM_MISMATCH: "loginOtherTg",
+  };
+  if (e?.code && keys[e.code]) return t(lang, keys[e.code]);
+  return t(lang, "error", { msg: esc(e.message) });
+}
+
+function getView(ctx) {
+  return { ...defaultView(), ...(sess(ctx).view || {}) };
+}
+
+function setView(ctx, partial) {
+  const next = { ...getView(ctx), ...partial };
+  sessions.patch(ctx.from.id, { view: next });
+  return next;
+}
+
 function html(ctx, text, extra = {}) {
+  const markup =
+    extra.reply_markup !== undefined
+      ? extra.reply_markup
+      : loggedIn(sess(ctx))
+        ? mainKeyboard(langOf(ctx))
+        : undefined;
   return ctx.reply(text, {
     parse_mode: "HTML",
     ...extra,
-    reply_markup: extra.reply_markup ?? mainKeyboard(langOf(ctx)),
+    reply_markup: markup,
   });
 }
 
@@ -65,187 +172,376 @@ async function editOrReply(ctx, text, markup) {
   }
   await ctx.reply(text, {
     parse_mode: "HTML",
-    reply_markup: markup ?? mainKeyboard(langOf(ctx)),
+    reply_markup: markup ?? (loggedIn(sess(ctx)) ? mainKeyboard(langOf(ctx)) : undefined),
   });
 }
 
-async function ensureAuth(ctx, referralCode) {
+async function ensureAuth(ctx) {
   const s = sess(ctx);
-  if (s.token && s.user) {
+  if (!loggedIn(s)) return s;
+  if (s.token) {
     try {
       const me = await api.me(s.token);
-      sessions.patch(ctx.from.id, { user: me.user, token: s.token, flow: null });
-      return sessions.get(ctx.from.id);
+      return sessions.patch(ctx.from.id, {
+        user: me.user || s.user,
+        token: s.token,
+      });
     } catch {
-      sessions.patch(ctx.from.id, { token: null, user: null });
+      sessions.patch(ctx.from.id, { token: null });
     }
   }
-
-  const data = await api.telegramAuth({
-    telegramId: ctx.from.id,
-    username: ctx.from.username,
-    firstName: ctx.from.first_name,
-    referralCode: referralCode || s.pendingRef || "",
-  });
-  sessions.patch(ctx.from.id, {
-    token: data.token,
-    user: data.user,
-    flow: null,
-    pendingRef: null,
-  });
-  return sessions.get(ctx.from.id);
+  return sess(ctx);
 }
 
 async function requireSession(ctx) {
   const s = sess(ctx);
-  if (s.token && s.user) return s;
-  try {
-    return await ensureAuth(ctx);
-  } catch (e) {
-    await html(ctx, t(langOf(ctx), "needAuth"));
-    throw e;
-  }
+  if (loggedIn(s)) return ensureAuth(ctx);
+  return s;
 }
 
-async function loadUpcoming() {
+async function loadUpcoming(force = false) {
+  if (!force && matchCache.list.length && Date.now() - matchCache.at < config.cacheMs) {
+    return matchCache.list;
+  }
   const data = await api.matches({ upcoming: true });
-  return upcoming(data.matches || []);
+  matchCache = { at: Date.now(), list: upcoming(data.matches || []) };
+  return matchCache.list;
+}
+
+function browseList(all, view) {
+  const filtered = filterMatches(all, {
+    scope: view.scope || "all",
+    league: view.league || "",
+  });
+  return sortMatches(filtered, view.sort === "confidence" ? "confidence" : "time");
 }
 
 function matchCard(lang, m) {
+  const round = m.round || "";
   let body = t(lang, "matchInfo", {
     home: esc(m.home?.name),
     away: esc(m.away?.name),
     league: esc(m.league),
-    when: esc(whenText(m)),
-    stadium: esc(m.stadium || "—"),
-    context: esc(m.context || ""),
+    round: esc(round ? ` · ${round}` : ""),
+    when: esc(whenText(m, lang)),
   });
-  if (m.referee) body += `\n${t(lang, "referee", { name: esc(m.referee) })}`;
+  const stadium = resolveStadium(m);
+  if (stadium) body += `\n${t(lang, "stadium", { name: esc(stadium) })}`;
+  const referee = resolveReferee(m);
+  if (referee) body += `\n${t(lang, "referee", { name: esc(referee) })}`;
   return body;
 }
 
-async function showMatches(ctx, page = 0, kind = "home") {
-  const lang = langOf(ctx);
-  const s = await requireSession(ctx);
-  const list = await loadUpcoming();
-  if (!list.length) {
-    await editOrReply(ctx, t(lang, "noMatches"), mainKeyboard(lang));
-    return;
-  }
-  const { page: p, pages } = paginate(list, page, config.pageSize);
-  const title = kind === "pred" ? t(lang, "predTitle") : t(lang, "matchesTitle", { page: p + 1, pages });
-  await editOrReply(
-    ctx,
-    title,
-    matchListKeyboard(
-      lang,
-      list,
-      p,
-      config.pageSize,
-      kind,
-      s.user?.plan,
-      config.freePreview,
-      t(lang, "live"),
-    ),
-  );
+function trackUser(ctx) {
+  const u = currentUser(ctx);
+  if (!u) return null;
+  return store.touchUser(u.id) || u;
 }
 
-async function showMatch(ctx, id, kind = "home") {
+function hasAccess(ctx) {
+  const u = currentUser(ctx);
+  if (!u) return false;
+  const sub = store.activeSubForUser(u.id);
+  return Boolean(sub && (sub.status === "active" || sub.status === "trialing"));
+}
+
+async function showWelcome(ctx) {
+  if (autoLoginFromTelegram(ctx)) {
+    await showMenu(ctx);
+    return;
+  }
   const lang = langOf(ctx);
+  const local = store.getUser(ctx.from.id);
+  const text = local?.registered ? t(lang, "welcomeBack") : t(lang, "welcomeGate");
+  if (ctx.callbackQuery?.message) {
+    await editOrReply(ctx, text, welcomeKeyboard(lang));
+    return;
+  }
+  await ctx.reply(text, {
+    parse_mode: "HTML",
+    reply_markup: { remove_keyboard: true },
+  });
+  await ctx.reply(t(lang, "welcomePick"), {
+    parse_mode: "HTML",
+    reply_markup: welcomeKeyboard(lang),
+  });
+}
+
+async function requireLogin(ctx) {
+  if (loggedIn(sess(ctx)) || autoLoginFromTelegram(ctx)) return true;
+  await showWelcome(ctx);
+  return false;
+}
+
+async function beginRegister(ctx) {
+  if (autoLoginFromTelegram(ctx)) {
+    await showMenu(ctx);
+    return;
+  }
+  const lang = langOf(ctx);
+  sessions.patch(ctx.from.id, { flow: "register_name", pendingName: null, pendingEmail: null });
+  await editOrReply(ctx, t(lang, "regAskName"));
+}
+
+async function beginLogin(ctx) {
+  if (autoLoginFromTelegram(ctx)) {
+    await showMenu(ctx);
+    return;
+  }
+  const lang = langOf(ctx);
+  sessions.patch(ctx.from.id, { flow: "register_name", pendingName: null, pendingEmail: null });
+  await editOrReply(ctx, t(lang, "needAuth"));
+}
+
+async function showNeedAccess(ctx) {
+  const lang = langOf(ctx);
+  await editOrReply(ctx, t(lang, "needAccess"), plansKeyboard(lang, store.listPlans(), (p) =>
+    priceLabel(p.priceCents, { currency: p.currency, interval: p.interval, lang }),
+  ));
+}
+
+function analysisBlock(lang, m, extraMarkets = "") {
+  const p = m.predictionPreview || {};
+  const home = esc(m.home?.name || "");
+  const away = esc(m.away?.name || "");
+  const outcome = pickOutcome(m);
+  const conf = p.confidence ?? "—";
+  let sentence = t(lang, "predNone");
+  if (outcome?.side === "home") {
+    sentence = t(lang, "predHome", { team: home, pct: outcome.pct, conf });
+  } else if (outcome?.side === "draw") {
+    sentence = t(lang, "predDraw", { pct: outcome.pct, conf });
+  } else if (outcome?.side === "away") {
+    sentence = t(lang, "predAway", { team: away, pct: outcome.pct, conf });
+  }
+
+  const lines = [
+    t(lang, "analysisTitle"),
+    sentence,
+    "",
+    `${home}  ${p.win ?? "—"}%  ${pctBar(p.win)}`,
+    `${t(lang, "drawLabel")}  ${p.draw ?? "—"}%  ${pctBar(p.draw)}`,
+    `${away}  ${p.loss ?? "—"}%  ${pctBar(p.loss)}`,
+  ];
+  const hxg = Number(m.home?.xg);
+  const axg = Number(m.away?.xg);
+  if (Number.isFinite(hxg) && Number.isFinite(axg)) {
+    let iaLine = t(lang, "iaLineLevel");
+    if (hxg > axg + 0.15) iaLine = t(lang, "iaLineHome", { team: home });
+    else if (axg > hxg + 0.15) iaLine = t(lang, "iaLineAway", { team: away });
+    lines.push("", iaLine);
+  }
+  if (p.topMarket != null) lines.push(t(lang, "topMarket", { pct: p.topMarket }));
+  const sig = signals(lang, m, outcome);
+  if (sig.length) {
+    lines.push("", t(lang, "aiSignals"), ...sig.map((s) => `• ${esc(s)}`));
+  }
+  if (extraMarkets) lines.push("", extraMarkets);
+  const footer = t(lang, "aiFooter");
+  if (footer) lines.push("", footer);
+  return lines.join("\n");
+}
+
+async function showMenu(ctx) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  trackUser(ctx);
+  await requireSession(ctx);
+  const all = await loadUpcoming();
+  const s = stats(all);
+  setView(ctx, { screen: "menu", page: 0, matchId: "", from: "menu", league: "", sort: "time" });
+  await editOrReply(ctx, t(lang, "menuHello"), menuKeyboard(lang, { hasLive: s.live > 0 }));
+}
+
+async function showLeagues(ctx) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  await requireSession(ctx);
+  const all = await loadUpcoming();
+  setView(ctx, { screen: "leagues", from: "menu", page: 0, matchId: "", league: "" });
+  await editOrReply(ctx, t(lang, "stepLeagues"), leaguesKeyboard(lang, all));
+}
+
+function listIntro(lang, view, leagueName) {
+  if (view.sort === "confidence") return t(lang, "stepTops");
+  if (view.scope === "today") return t(lang, "stepToday");
+  if (view.scope === "live") return t(lang, "stepLive");
+  if (view.league) return t(lang, "stepLeague", { league: esc(leagueName || view.league) });
+  return t(lang, "stepAll");
+}
+
+async function showList(ctx, patch = {}) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  await requireSession(ctx);
+  const prev = getView(ctx);
+  const view = setView(ctx, {
+    screen: "list",
+    from: "list",
+    matchId: "",
+    scope: patch.scope ?? prev.scope ?? "today",
+    league: patch.league !== undefined ? patch.league : prev.league,
+    sort: patch.sort ?? prev.sort ?? "time",
+    page: patch.page ?? (patch.scope || patch.league !== undefined || patch.sort ? 0 : prev.page),
+  });
+  const all = await loadUpcoming();
+  const list = browseList(all, view);
+  const emptyKey =
+    view.scope === "live" ? "noLive" : view.league ? "noLeague" : view.scope === "today" ? "noToday" : "noMatches";
+  if (!list.length) {
+    await editOrReply(ctx, t(lang, emptyKey), menuKeyboard(lang));
+    return;
+  }
+  const { slice, page: p, pages } = paginate(list, view.page, config.pageSize);
+  setView(ctx, { page: p });
+  const leagueName = slice[0]?.league || "";
+  const body = slice
+    .map((m, i) => listEntry(m, p * config.pageSize + i + 1, lang, whenText))
+    .join("\n\n");
+  const text =
+    listIntro(lang, { ...view, page: p }, leagueName) +
+    t(lang, "stepCount", { count: list.length, page: p + 1, pages }) +
+    `\n\n${body}`;
+  await editOrReply(ctx, text, listKeyboard(lang, slice, p, pages, config.pageSize));
+}
+
+async function showMatch(ctx, id) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  trackUser(ctx);
+  if (!hasAccess(ctx)) {
+    await showNeedAccess(ctx);
+    return;
+  }
   const s = await requireSession(ctx);
-  const list = await loadUpcoming();
-  const idx = list.findIndex((m) => m.id === id);
-  const m = list[idx] ?? list.find((x) => String(x.externalId) === id);
-  if (!m) {
+  const all = await loadUpcoming();
+  const current = getView(ctx);
+  const from = current.screen === "match" ? current.from : current.screen;
+  const browseView = {
+    ...current,
+    screen: "list",
+    sort: current.sort,
+    scope: current.scope,
+    league: current.league,
+  };
+  const pool = browseList(all, browseView);
+  const listed = findMatch(pool, id).match || findMatch(all, id).match;
+  if (!listed) {
     await editOrReply(ctx, t(lang, "noMatches"));
     return;
   }
-  const locked = isLocked(s.user?.plan, idx < 0 ? 0 : idx, config.freePreview);
-  let text = matchCard(lang, m);
-  if (locked) {
-    text += `\n\n${t(lang, "locked")}`;
-  } else if (m.predictionPreview) {
-    text += `\n\n${t(lang, "preview", {
-      pick: pickLabel(m, {
-        home: t(lang, "pickHome"),
-        draw: t(lang, "pickDraw"),
-        away: t(lang, "pickAway"),
-      }),
-      conf: m.predictionPreview.confidence ?? "—",
-    })}`;
-  }
-  await editOrReply(ctx, text, matchDetailKeyboard(lang, m, locked));
-}
+  const match = {
+    ...listed,
+    home: listed.home,
+    away: listed.away,
+    predictionPreview: listed.predictionPreview ? { ...listed.predictionPreview } : {},
+  };
+  setView(ctx, { screen: "match", matchId: listed.id, from: from || "list" });
 
-async function showFullPred(ctx, id) {
-  const lang = langOf(ctx);
-  const s = await requireSession(ctx);
-  const list = await loadUpcoming();
-  const idx = list.findIndex((m) => m.id === id);
-  if (isLocked(s.user?.plan, idx, config.freePreview)) {
-    await editOrReply(ctx, t(lang, "locked"));
-    await showPlans(ctx);
-    return;
-  }
+  await editOrReply(
+    ctx,
+    t(lang, "aiThinking", {
+      home: esc(match.home?.name),
+      away: esc(match.away?.name),
+    }),
+  );
   try {
-    const data = await api.matchPredictions(s.token, id);
-    const m = data.match ?? list[idx];
-    const home = esc(m?.home?.name || "1");
-    const away = esc(m?.away?.name || "2");
-    const markets = (data.markets || [])
-      .slice(0, 6)
-      .map((mk) => `• ${esc(mk.label)} — ${mk.pct}%`)
-      .join("\n");
-    let text = t(lang, "predBody", {
-      home,
-      away,
-      win: data.probs?.win ?? "—",
-      draw: data.probs?.draw ?? "—",
-      loss: data.probs?.loss ?? "—",
-      conf: data.confidence ?? "—",
-      markets,
-    });
-    text += `\n\n<i>${t(lang, "creditCharged")}</i>`;
-    await editOrReply(ctx, text, matchDetailKeyboard(lang, { id }, false));
-  } catch (e) {
-    if (e instanceof ApiError && (e.status === 402 || e.code === "INSUFFICIENT_CREDITS")) {
-      await editOrReply(ctx, t(lang, "creditsLow"));
-      return;
-    }
-    throw e;
-  }
-}
-
-async function showProfile(ctx) {
-  const lang = langOf(ctx);
-  const s = await requireSession(ctx);
-  let credits = "—";
-  let quota = "—";
-  try {
-    const c = await api.credits(s.token);
-    credits = String(c.balance ?? "—");
-    quota = String(c.monthlyAllowance ?? "—");
-    sessions.patch(ctx.from.id, { user: { ...s.user, plan: c.planCode || s.user.plan, planName: c.planName || s.user.planName } });
+    await ctx.api.sendChatAction(ctx.chat.id, "typing");
   } catch {
     /* */
   }
-  const u = sessions.get(ctx.from.id)?.user || s.user;
+  await sleep(1100 + Math.floor(Math.random() * 700));
+
+  let extra = "";
+  if (s.token) {
+    try {
+      const data = await api.matchPredictions(s.token, listed.id);
+      if (data.probs) {
+        match.predictionPreview = {
+          ...(match.predictionPreview || {}),
+          win: data.probs.win,
+          draw: data.probs.draw,
+          loss: data.probs.loss,
+          confidence: data.confidence ?? match.predictionPreview?.confidence,
+        };
+      }
+      extra = (data.markets || [])
+        .slice(0, 6)
+        .map((mk) => `• ${esc(mk.label)} — ${mk.pct}%`)
+        .join("\n");
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 402 || e.code === "INSUFFICIENT_CREDITS")) {
+        await editOrReply(ctx, t(lang, "creditsLow"));
+        return;
+      }
+    }
+  }
+
+  const text = `${t(lang, "stepAnalysis")}${matchCard(lang, match)}\n\n${analysisBlock(lang, match, extra)}`;
+  const nav = neighbors(pool.length ? pool : all, listed.id);
+  await editOrReply(ctx, text, matchDetailKeyboard(lang, listed, { prev: nav.prev, next: nav.next }));
+}
+
+async function goBack(ctx) {
+  const view = getView(ctx);
+  if (view.from === "leagues" || view.league) {
+    if (view.screen === "match") return showList(ctx);
+    return showLeagues(ctx);
+  }
+  if (view.screen === "match") return showList(ctx);
+  return showMenu(ctx);
+}
+
+async function openListedNumber(ctx, n) {
+  const view = getView(ctx);
+  if (view.screen !== "list" && view.screen !== "match") return false;
+  const all = await loadUpcoming();
+  const list = browseList(all, view.screen === "match" ? { ...view, screen: "list" } : view);
+  const m = list[n - 1];
+  if (!m) return false;
+  await showMatch(ctx, m.id);
+  return true;
+}
+
+function profileMarkup(lang, s) {
+  return profileKeyboard(lang, { loggedIn: loggedIn(s), notif: s.notif !== false });
+}
+
+async function showProfile(ctx) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  trackUser(ctx);
+  const s = await requireSession(ctx);
+  setView(ctx, { screen: "account" });
+  const local = currentUser(ctx);
+  const sub = local ? store.activeSubForUser(local.id) : null;
+  const u = local || s.user || {};
   await editOrReply(
     ctx,
     t(lang, "profile", {
-      name: esc(u.displayName || u.email),
-      plan: esc(u.planName || u.plan || "Starter"),
-      credits,
-      quota,
+      name: esc(u.displayName || u.email || ctx.from.first_name),
+      plan: esc(sub?.planName || t(lang, "noAccessPlan")),
+      credits: "",
+      quota: sub
+        ? `Jusqu'au ${new Date(sub.currentPeriodEnd).toLocaleDateString("fr-FR")}`
+        : "Prends un accès pour utiliser le bot.",
     }),
-    profileKeyboard(lang),
+    profileMarkup(lang, sessions.get(ctx.from.id) || s),
   );
 }
 
 async function showReferral(ctx) {
+  if (!(await requireLogin(ctx))) return;
   const lang = langOf(ctx);
   const s = await requireSession(ctx);
+  if (!loggedIn(s)) {
+    await editOrReply(ctx, t(lang, "needLogin"), profileMarkup(lang, s));
+    return;
+  }
+  if (!s.token) {
+    await editOrReply(ctx, t(lang, "familyEmpty"), profileMarkup(lang, s));
+    return;
+  }
   const data = await api.referral(s.token);
   const r = data.referral || {};
   const link = botUsername ? `https://t.me/${botUsername}?start=${r.code}` : r.code;
@@ -264,38 +560,137 @@ async function showReferral(ctx) {
       .map((f) => t(lang, "familyRow", { name: esc(f.name), credits: f.creditsEarned ?? 0 }))
       .join("\n");
   }
-  await editOrReply(ctx, text, profileKeyboard(lang));
+  await editOrReply(ctx, text, profileMarkup(lang, s));
 }
 
 async function showPlans(ctx) {
+  if (!(await requireLogin(ctx))) return;
   const lang = langOf(ctx);
+  const localUser = currentUser(ctx) || trackUser(ctx);
   const s = await requireSession(ctx);
-  const [plansRes, subRes] = await Promise.all([
-    api.plans(),
-    api.subscription(s.token).catch(() => ({ subscription: null })),
-  ]);
-  const current = subRes.subscription?.planName || s.user?.planName || s.user?.plan || "—";
+  const plans = store.listPlans();
+  const sub = localUser ? store.activeSubForUser(localUser.id) : null;
+  const current = sub?.planName || t(lang, "noAccessPlan");
   let text = t(lang, "plansTitle", { plan: esc(current) }) + "\n";
-  for (const p of plansRes.plans || []) {
+  for (const p of plans) {
     text +=
       "\n" +
       t(lang, "planCard", {
         name: esc(p.name),
-        price: priceLabel(p.price_cents),
+        price: priceLabel(p.priceCents, { currency: p.currency, interval: p.interval, lang }),
         desc: esc(p.description || ""),
-        credits: p.monthly_credits ?? p.max_predictions_per_day ?? "—",
+        credits: p.credits ?? p.maxPredictionsPerDay ?? "—",
       }) +
       "\n";
   }
-  await editOrReply(ctx, text, plansKeyboard(lang, plansRes.plans || []));
+  await editOrReply(
+    ctx,
+    text,
+    plansKeyboard(lang, plans, (p) => priceLabel(p.priceCents, { currency: p.currency, interval: p.interval, lang })),
+  );
+}
+
+async function startTchinPay(ctx, planCode) {
+  if (!(await requireLogin(ctx))) return;
+  const lang = langOf(ctx);
+  const user = currentUser(ctx) || trackUser(ctx);
+  const plan = store.getPlan(planCode);
+  if (!user || !plan || !plan.active) {
+    await html(ctx, t(lang, "error", { msg: "Plan indisponible" }));
+    return;
+  }
+  try {
+    const checkout = await tchin.createCheckout({ user, plan, telegramId: ctx.from.id, lang });
+    if (checkout.free) {
+      await editOrReply(ctx, t(lang, "payFree", { plan: esc(plan.name) }), profileMarkup(lang, sess(ctx)));
+      return;
+    }
+    if (!checkout.checkoutUrl) throw new Error("Tchin n'a pas renvoyé d'URL de paiement");
+    await editOrReply(
+      ctx,
+      t(lang, "payLink", {
+        plan: esc(plan.name),
+        price: priceLabel(plan.priceCents, { currency: plan.currency, interval: plan.interval, lang }),
+      }) + `\n\n${esc(checkout.checkoutUrl)}`,
+      payKeyboard(lang, checkout.checkoutUrl),
+    );
+  } catch (e) {
+    if (e.code === "TCHIN_NOT_CONFIGURED") {
+      await html(ctx, t(lang, "payNotConfigured"));
+      return;
+    }
+    await html(ctx, t(lang, "error", { msg: esc(e.message) }));
+  }
 }
 
 async function showHelp(ctx) {
+  if (!(await requireLogin(ctx))) return;
   const lang = langOf(ctx);
   await html(
     ctx,
     t(lang, "help", { email: esc(config.supportEmail), web: esc(config.webUrl) }),
   );
+}
+
+function isMenuText(text, lang) {
+  const labels = [t(lang, "btnMenu"), t(lang, "btnToday"), t(lang, "btnLeagues"), t(lang, "btnAccount"), t(lang, "btnHelp")];
+  if (labels.includes(text)) return true;
+  return /Menu|Menú|Меню|Aujourd'hui|Today|Hoy|Сегодня|Compétition|Competition|Competiciones|Турнир|Compte|Account|Cuenta|Аккаунт|Aide|Help|Ayuda|Помощь|Analyses|Prédictions/.test(
+    text,
+  );
+}
+
+async function handleMenu(ctx, text, lang) {
+  if (text === t(lang, "btnMenu") || /^🏠/.test(text)) {
+    await showMenu(ctx);
+    return true;
+  }
+  if (text === t(lang, "btnToday") || text.includes("Aujourd'hui") || text.includes("Today") || text.includes("Hoy") || text.includes("Сегодня")) {
+    await showList(ctx, { scope: "today", league: "", sort: "time", page: 0 });
+    return true;
+  }
+  if (text === t(lang, "btnLeagues") || text.includes("Compétition") || text.includes("Competition") || text.includes("Турнир")) {
+    await showLeagues(ctx);
+    return true;
+  }
+  if (text === t(lang, "btnAccount") || text.includes("Compte") || text.includes("Account") || text.includes("Cuenta") || text.includes("Аккаунт")) {
+    await showProfile(ctx);
+    return true;
+  }
+  if (text === t(lang, "btnHelp") || text.includes("Aide") || text.includes("Help") || text.includes("Ayuda") || text.includes("Помощь")) {
+    await showHelp(ctx);
+    return true;
+  }
+  return false;
+}
+
+async function applyLogin(ctx, email, password) {
+  const user = store.loginBotUser({ from: ctx.from, email, password });
+  let token = null;
+  let remoteUser = null;
+  try {
+    const data = await api.login({ email, password });
+    const extracted = extractAuth(data);
+    token = extracted.token || null;
+    remoteUser = extracted.user || null;
+  } catch {
+    /* le compte local suffit */
+  }
+  sessions.patch(ctx.from.id, {
+    loggedIn: true,
+    userId: user.id,
+    token,
+    user: remoteUser || user,
+    flow: null,
+    pendingEmail: null,
+    pendingName: null,
+  });
+  try {
+    await ctx.deleteMessage();
+  } catch {
+    /* */
+  }
+  return sessions.get(ctx.from.id);
 }
 
 bot.catch((err) => {
@@ -305,80 +700,198 @@ bot.catch((err) => {
 bot.command("start", async (ctx) => {
   const payload = String(ctx.match || "").trim();
   if (payload) sessions.patch(ctx.from.id, { pendingRef: payload });
-  const lang = langOf(ctx);
-  try {
-    const s = await ensureAuth(ctx, payload);
-    await html(
-      ctx,
-      `${t(lang, "start")}\n\n${t(lang, "startLinked", {
-        name: esc(s.user?.displayName || s.user?.email),
-        plan: esc(s.user?.planName || s.user?.plan || "Starter"),
-      })}`,
-    );
-  } catch (e) {
-    await html(ctx, t(lang, "error", { msg: esc(e.message) }));
+  autoLoginFromTelegram(ctx);
+  if (!loggedIn(sess(ctx))) {
+    sessions.patch(ctx.from.id, { flow: null, pendingEmail: null, pendingName: null });
+    await showWelcome(ctx);
+    return;
   }
+  try {
+    await ensureAuth(ctx);
+  } catch (e) {
+    if (e?.message) console.warn("start:", e.message);
+  }
+  await showMenu(ctx);
 });
 
 bot.command("help", (ctx) => showHelp(ctx));
 bot.command("profile", (ctx) => showProfile(ctx));
-bot.command("matches", (ctx) => showMatches(ctx, 0, "home"));
-bot.command("predictions", (ctx) => showMatches(ctx, 0, "pred"));
+bot.command("matches", (ctx) => showList(ctx, { scope: "today", league: "", sort: "time", page: 0 }));
+bot.command("predictions", (ctx) => showMenu(ctx));
 
 bot.on("callback_query:data", async (ctx) => {
   const data = ctx.callbackQuery.data;
-  await ctx.answerCallbackQuery();
   const lang = langOf(ctx);
+  if (data.startsWith("m:")) {
+    await ctx.answerCallbackQuery({ text: t(lang, "toastOpen") });
+  } else {
+    await ctx.answerCallbackQuery();
+  }
 
   try {
     if (data === "noop") return;
+    if (data === "auth:register") return void (await beginRegister(ctx));
+    if (data === "auth:login") return void (await beginLogin(ctx));
+    if (!loggedIn(sess(ctx)) && !autoLoginFromTelegram(ctx)) {
+      if (data === "lang" || data.startsWith("setlang:")) {
+        /* langue avant connexion */
+      } else {
+        return void (await showWelcome(ctx));
+      }
+    }
+    if (data === "help") return void (await showHelp(ctx));
     if (data === "profile") return void (await showProfile(ctx));
     if (data === "sub") return void (await showPlans(ctx));
     if (data === "ref") return void (await showReferral(ctx));
     if (data === "lang") return void (await editOrReply(ctx, t(lang, "langTitle"), langKeyboard()));
-    if (data === "link") {
-      sessions.patch(ctx.from.id, { flow: "link_email" });
-      return void (await html(ctx, t(lang, "linkAskEmail")));
+    if (data === "go:menu" || data === "go:home") return void (await showMenu(ctx));
+    if (data === "go:back") return void (await goBack(ctx));
+    if (data === "go:leagues") return void (await showLeagues(ctx));
+    if (data === "go:top") {
+      return void (await showList(ctx, { scope: "today", league: "", sort: "confidence", page: 0 }));
     }
+    if (data.startsWith("go:list:")) {
+      return void (await showList(ctx, { scope: data.slice(8), league: "", sort: "time", page: 0 }));
+    }
+    if (data.startsWith("lg:")) {
+      return void (await showList(ctx, { scope: "all", league: data.slice(3), sort: "time", page: 0 }));
+    }
+    if (data.startsWith("pg:")) {
+      return void (await showList(ctx, { page: Number(data.slice(3)) || 0 }));
+    }
+    if (data.startsWith("m:")) return void (await showMatch(ctx, data.slice(2)));
+    if (data === "notif") {
+      const s = sess(ctx);
+      const next = s.notif === false;
+      const updated = sessions.patch(ctx.from.id, { notif: next });
+      return void (await html(ctx, t(lang, next ? "notifOn" : "notifOff"), {
+        reply_markup: profileMarkup(lang, updated),
+      }));
+    }
+    if (data === "link") return void (await beginLogin(ctx));
     if (data === "logout") {
-      sessions.patch(ctx.from.id, { token: null, user: null, flow: null });
-      return void (await html(ctx, t(lang, "logoutOk")));
+      sessions.patch(ctx.from.id, {
+        loggedIn: false,
+        token: null,
+        user: null,
+        userId: null,
+        flow: null,
+        pendingEmail: null,
+        pendingName: null,
+      });
+      await ctx.reply(t(lang, "logoutOk"), {
+        parse_mode: "HTML",
+        reply_markup: { remove_keyboard: true },
+      });
+      return;
     }
     if (data.startsWith("setlang:")) {
       const code = data.split(":")[1];
       sessions.patch(ctx.from.id, { lang: code });
       return void (await html(ctx, t(code, "langSet")));
     }
-    if (data.startsWith("pg:")) {
-      const [, kind, page] = data.split(":");
-      return void (await showMatches(ctx, Number(page) || 0, kind === "pred" ? "pred" : "home"));
-    }
-    if (data.startsWith("home:") || data.startsWith("pred:")) {
-      const [kind, ...rest] = data.split(":");
-      return void (await showMatch(ctx, rest.join(":"), kind));
-    }
-    if (data.startsWith("full:")) {
-      return void (await showFullPred(ctx, data.slice(5)));
-    }
     if (data.startsWith("plan:")) {
-      const planCode = data.slice(5);
-      const methods = await api.paymentMethods();
-      return void (await editOrReply(
-        ctx,
-        t(lang, "pickPay", { plan: esc(planCode) }),
-        payKeyboard(planCode, methods.methods || []),
-      ));
+      return void (await startTchinPay(ctx, data.slice(5)));
     }
     if (data.startsWith("pay:")) {
-      const [, planCode, method] = data.split(":");
-      const s = await requireSession(ctx);
-      await api.upgradeRequest(s.token, { planCode, paymentMethodCode: method });
-      return void (await html(ctx, t(lang, "upgradeOk")));
+      return void (await startTchinPay(ctx, data.split(":")[1]));
     }
   } catch (e) {
     await html(ctx, t(lang, "error", { msg: esc(e.message) }));
   }
 });
+
+async function handleAuthText(ctx, text, lang, s) {
+  if (isMenuText(text, lang)) {
+    sessions.patch(ctx.from.id, { flow: null, pendingEmail: null, pendingName: null });
+    if (loggedIn(sess(ctx)) || autoLoginFromTelegram(ctx)) await showMenu(ctx);
+    else await showWelcome(ctx);
+    return true;
+  }
+
+  const flow = s.flow === "link_email" ? "login_email" : s.flow === "link_pass" ? "login_pass" : s.flow;
+
+  if (flow === "register_name") {
+    if (text.trim().length < 2) {
+      await html(ctx, t(lang, "nameBad"));
+      return true;
+    }
+    sessions.patch(ctx.from.id, { flow: "register_email", pendingName: text.trim() });
+    await html(ctx, t(lang, "regAskEmail"));
+    return true;
+  }
+
+  if (flow === "register_email") {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text.trim())) {
+      await html(ctx, t(lang, "emailBad"));
+      return true;
+    }
+    sessions.patch(ctx.from.id, { flow: "register_pass", pendingEmail: text.trim().toLowerCase() });
+    await html(ctx, t(lang, "regAskPass"));
+    return true;
+  }
+
+  if (flow === "register_pass") {
+    try {
+      await ctx.deleteMessage();
+    } catch {
+      /* */
+    }
+    if (text.length < 6) {
+      await html(ctx, t(lang, "passBad"));
+      return true;
+    }
+    try {
+      store.registerBotUser({
+        from: ctx.from,
+        email: s.pendingEmail,
+        password: text,
+        displayName: s.pendingName || ctx.from.first_name,
+        lang,
+        referralCode: s.pendingRef || "",
+      });
+      await applyLogin(ctx, s.pendingEmail, text);
+      await html(ctx, t(lang, "regOk"));
+      await showMenu(ctx);
+    } catch (e) {
+      if (e.code === "ALREADY_REGISTERED") {
+        autoLoginFromTelegram(ctx);
+        await html(ctx, t(lang, "regAlready"));
+        await showMenu(ctx);
+      } else if (e.code === "EMAIL_TAKEN") {
+        sessions.patch(ctx.from.id, { flow: "register_email" });
+        await html(ctx, t(lang, "regEmailTaken"));
+      } else {
+        await html(ctx, authErrorText(lang, e));
+      }
+    }
+    return true;
+  }
+
+  if (flow === "login_email") {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text.trim())) {
+      await html(ctx, t(lang, "emailBad"));
+      return true;
+    }
+    sessions.patch(ctx.from.id, { flow: "login_pass", pendingEmail: text.trim().toLowerCase() });
+    await html(ctx, t(lang, "loginAskPass"));
+    return true;
+  }
+
+  if (flow === "login_pass") {
+    try {
+      await applyLogin(ctx, s.pendingEmail, text);
+      await html(ctx, t(lang, "loginOk"));
+      await showMenu(ctx);
+    } catch (e) {
+      sessions.patch(ctx.from.id, { flow: "login_email", pendingEmail: null });
+      await html(ctx, authErrorText(lang, e));
+    }
+    return true;
+  }
+
+  return false;
+}
 
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
@@ -386,67 +899,29 @@ bot.on("message:text", async (ctx) => {
   const lang = langOf(ctx);
   const s = sess(ctx);
 
-  if (s.flow === "link_email") {
-    if (text === "/start") {
-      sessions.patch(ctx.from.id, { flow: null });
-      return;
-    }
-    sessions.patch(ctx.from.id, { flow: "link_pass", pendingEmail: text });
-    await html(ctx, t(lang, "linkAskPass"));
+  if (isAuthFlow(s.flow) || s.flow === "link_email" || s.flow === "link_pass") {
+    await handleAuthText(ctx, text, lang, s);
     return;
   }
 
-  if (s.flow === "link_pass") {
-    try {
-      const data = await api.telegramAuth({
-        telegramId: ctx.from.id,
-        username: ctx.from.username,
-        firstName: ctx.from.first_name,
-        linkEmail: s.pendingEmail,
-        linkPassword: text,
-      });
-      sessions.patch(ctx.from.id, {
-        token: data.token,
-        user: data.user,
-        flow: null,
-        pendingEmail: null,
-      });
-      try {
-        await ctx.deleteMessage();
-      } catch {
-        /* */
-      }
-      await html(ctx, t(lang, "linkOk", { name: esc(data.user.displayName || data.user.email) }));
-    } catch (e) {
-      sessions.patch(ctx.from.id, { flow: null, pendingEmail: null });
-      await html(ctx, t(lang, "error", { msg: esc(e.message) }));
-    }
+  if (!loggedIn(s) && autoLoginFromTelegram(ctx)) {
+    await showMenu(ctx);
     return;
   }
 
-  if (text === t(lang, "btnHome") || text === "⚽ Matchs" || text === "⚽ Matches" || text === "⚽ Partidos" || text === "⚽ Матчи") {
-    await showMatches(ctx, 0, "home");
-    return;
-  }
-  if (text === t(lang, "btnPred") || text.includes("Prédictions") || text.includes("Predictions") || text.includes("Pronósticos") || text.includes("Прогнозы")) {
-    await showMatches(ctx, 0, "pred");
-    return;
-  }
-  if (text === t(lang, "btnProfile") || text.includes("Profil") || text.includes("Profile") || text.includes("Perfil") || text.includes("Профиль")) {
-    await showProfile(ctx);
-    return;
-  }
-  if (text === t(lang, "btnHelp") || text.includes("Aide") || text.includes("Help") || text.includes("Ayuda") || text.includes("Помощь")) {
-    await showHelp(ctx);
+  if (!loggedIn(sess(ctx))) {
+    await showWelcome(ctx);
     return;
   }
 
-  await html(ctx, t(lang, "menu"));
+  if (/^\d+$/.test(text) && (await openListedNumber(ctx, Number(text)))) return;
+  if (await handleMenu(ctx, text, lang)) return;
+  await showMenu(ctx);
 });
 
 async function reminderTick() {
   try {
-    const list = await loadUpcoming();
+    const list = await loadUpcoming(true);
     const soon = list.filter((m) => {
       if (!m.dateIso) return false;
       const diff = new Date(m.dateIso).getTime() - Date.now();
@@ -455,7 +930,7 @@ async function reminderTick() {
     if (!soon.length) return;
 
     for (const [id, s] of sessions.entries()) {
-      if (!s.notif || !s.token) continue;
+      if (!s.loggedIn || s.notif === false) continue;
       const reminded = s.reminded || {};
       for (const m of soon.slice(0, 3)) {
         if (reminded[m.id]) continue;
@@ -466,7 +941,7 @@ async function reminderTick() {
             t(lang, "reminder", {
               home: esc(m.home?.name),
               away: esc(m.away?.name),
-              when: esc(whenText(m)),
+              when: esc(whenText(m, lang)),
               league: esc(m.league),
             }),
             { parse_mode: "HTML" },
@@ -484,6 +959,16 @@ async function reminderTick() {
 }
 
 async function start() {
+  const generated = config.adminPassword ? "" : randomBytes(9).toString("base64url");
+  const boot = store.ensureAdmin(generated || config.adminPassword || "changeme-admin");
+  if (boot.created && boot.password) {
+    console.log(`Admin web : ${boot.email}  mot de passe : ${boot.password}`);
+    console.log("Définis ADMIN_PASSWORD dans .env pour le figer.");
+  }
+
+  const publicDir = join(dirname(fileURLToPath(import.meta.url)), "../public");
+  startHttpServer({ config, store, tchin, publicDir });
+
   try {
     const h = await api.health();
     console.log(`API Predictbet OK (db=${h.database}) → ${config.apiUrl}`);
@@ -494,6 +979,13 @@ async function start() {
   const me = await bot.api.getMe();
   botUsername = me.username;
   console.log(`Bot Telegram @${me.username} démarré (long polling)`);
+  console.log(`Tchin : ${tchin.configured ? tchin.env : "non configuré"} → ${tchin.apiUrl}`);
+  if (!tchin.configured) {
+    console.warn("Tchin : mets TCHIN_PUBLIC_KEY et TCHIN_SECRET_KEY (espace Tchin, onglet API).");
+  }
+  if (!/^https:\/\//i.test(config.publicUrl) || /localhost|127\.0\.0\.1/i.test(config.publicUrl)) {
+    console.warn("Tchin : PUBLIC_URL doit être une URL HTTPS publique — Tchin refuse le HTTP et le localhost.");
+  }
 
   setInterval(() => void reminderTick(), 15 * 60 * 1000);
   await bot.start({

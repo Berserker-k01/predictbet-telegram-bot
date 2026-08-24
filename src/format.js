@@ -1,3 +1,5 @@
+const LOCALES = { fr: "fr-FR", en: "en-GB", es: "es-ES", ru: "ru-RU" };
+
 export function esc(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -21,21 +23,30 @@ export function isLocked(plan, index, freePreview) {
   return index >= freePreview;
 }
 
+export function findMatch(list, id) {
+  const want = String(id ?? "");
+  const idx = list.findIndex((m) => String(m.id) === want || String(m.externalId) === want);
+  return { match: idx >= 0 ? list[idx] : null, idx };
+}
+
 export function pickLabel(m, langPick) {
   const p = m.predictionPreview;
   if (!p) return "—";
-  const max = Math.max(p.win ?? 0, p.draw ?? 0, p.loss ?? 0);
-  if (max === (p.win ?? 0)) return `${langPick.home} ${p.win}%`;
-  if (max === (p.draw ?? 0)) return `${langPick.draw} ${p.draw}%`;
-  return `${langPick.away} ${p.loss}%`;
+  const win = p.win ?? 0;
+  const draw = p.draw ?? 0;
+  const loss = p.loss ?? 0;
+  const max = Math.max(win, draw, loss);
+  if (max === win) return `${langPick.home} ${win}%`;
+  if (max === draw) return `${langPick.draw} ${draw}%`;
+  return `${langPick.away} ${loss}%`;
 }
 
-export function whenText(m) {
+export function whenText(m, lang = "fr") {
   if (m.live) return "LIVE";
   const iso = m.dateIso;
   if (!iso) return `${m.date ?? ""} ${m.time ?? ""}`.trim();
   const d = new Date(iso);
-  return d.toLocaleString("fr-FR", {
+  return d.toLocaleString(LOCALES[lang] || LOCALES.fr, {
     weekday: "short",
     day: "numeric",
     month: "short",
@@ -44,10 +55,34 @@ export function whenText(m) {
   });
 }
 
-export function matchLine(m, { locked, liveLabel }) {
+export function pctBar(pct) {
+  const n = Math.max(0, Math.min(100, Number(pct) || 0));
+  const filled = Math.round(n / 10);
+  return `${"█".repeat(filled)}${"░".repeat(10 - filled)}`;
+}
+
+export function timeShort(m, lang = "fr") {
+  if (m.live) return "LIVE";
+  if (!m.dateIso) return m.time || "";
+  const d = new Date(m.dateIso);
+  return d.toLocaleTimeString(LOCALES[lang] || LOCALES.fr, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function matchLine(m, { locked, liveLabel, pick } = {}) {
+  const home = m.home?.name;
+  const away = m.away?.name;
   const live = m.live ? ` ${liveLabel}` : "";
   const lock = locked ? " 🔒" : "";
-  return `${esc(m.home?.name)} vs ${esc(m.away?.name)}${live}${lock}`;
+  const pickTxt = pick ? ` · ${pick}` : "";
+  return `${esc(home)} vs ${esc(away)}${pickTxt}${live}${lock}`;
+}
+
+export function listEntry(m, n, lang, whenTextFn) {
+  const live = m.live ? "  ⚡️ LIVE" : "";
+  return `${n}. <b>${esc(m.home?.name)} vs ${esc(m.away?.name)}</b>${live}\n    🏆 ${esc(m.league || "")} · ${esc(whenTextFn(m, lang))}`;
 }
 
 export function paginate(list, page, size) {
@@ -56,8 +91,32 @@ export function paginate(list, page, size) {
   return { page: p, pages, slice: list.slice(p * size, p * size + size) };
 }
 
-export function priceLabel(cents) {
+export function isZeroDecimal(currency) {
+  return ["XOF", "XAF", "JPY", "KRW"].includes(String(currency || "").toUpperCase());
+}
+
+export function formatMoney(amount, currency = "XOF", lang = "fr") {
+  const n = Number(amount) || 0;
+  const major = isZeroDecimal(currency) ? n : n / 100;
+  const loc = lang === "en" ? "en-GB" : lang === "es" ? "es-ES" : lang === "ru" ? "ru-RU" : "fr-FR";
+  try {
+    return new Intl.NumberFormat(loc, { style: "currency", currency, maximumFractionDigits: isZeroDecimal(currency) ? 0 : 2 }).format(major);
+  } catch {
+    return `${major.toLocaleString(loc)} ${currency}`;
+  }
+}
+
+export function priceLabel(cents, { currency = "XOF", interval, lang = "fr" } = {}) {
   const n = Number(cents) || 0;
-  if (n <= 0) return "Gratuit";
-  return `${(n / 100).toFixed(2)} €`;
+  const free = { fr: "Gratuit", en: "Free", es: "Gratis", ru: "Бесплатно" };
+  if (n <= 0) return free[lang] || free.fr;
+  const money = formatMoney(n, currency, lang);
+  const per = {
+    fr: { week: "/ semaine", month: "/ mois", year: "/ an", day: "/ jour" },
+    en: { week: "/ week", month: "/ month", year: "/ year", day: "/ day" },
+    es: { week: "/ semana", month: "/ mes", year: "/ año", day: "/ día" },
+    ru: { week: "/ нед.", month: "/ мес.", year: "/ год", day: "/ день" },
+  };
+  const suffix = interval ? per[lang]?.[interval] || per.fr[interval] || "" : "";
+  return `${money}${suffix ? ` ${suffix}` : ""}`;
 }

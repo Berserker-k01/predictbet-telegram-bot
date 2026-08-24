@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Admin · Predictbet</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=Outfit:wght@600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/admin/admin.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="side">
+        <div class="brand">
+          <span class="logo-mark">P</span>
+          <div>
+            <h1>Predictbet</h1>
+            <p class="muted" id="tchinBadge">Tchin</p>
+          </div>
+        </div>
+        <nav id="nav"></nav>
+        <div style="margin-top:auto">
+          <p class="muted" id="who"></p>
+          <button class="btn ghost small" id="logout">Déconnexion</button>
+        </div>
+      </aside>
+      <main class="main">
+        <div class="top">
+          <div>
+            <h2 id="title">Dashboard</h2>
+            <p class="muted" id="subtitle">Pilotage users, plans et paiements</p>
+          </div>
+          <button class="btn small" id="primaryBtn" hidden>Nouveau</button>
+        </div>
+        <div id="view"></div>
+      </main>
+    </div>
+    <div id="modal" class="modal-bg hidden"></div>
+    <script src="/admin/admin.js"></script>
+  </body>
+</html>
