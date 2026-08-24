@@ -12,17 +12,28 @@ export class ApiError extends Error {
   }
 }
 
+export function extractMatches(data = {}) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.matches)) return data.matches;
+  if (Array.isArray(data.data?.matches)) return data.data.matches;
+  if (Array.isArray(data.data)) return data.data;
+  if (Array.isArray(data.items)) return data.items;
+  return [];
+}
+
 export function createApi(config) {
-  async function request(path, { method = "GET", token, body } = {}) {
+  async function request(path, { method = "GET", token, body, apiUrl } = {}) {
     const headers = { Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (token) headers.Authorization = `Bearer ${token}`;
     if (config.botSecret) headers["X-Predictbet-Telegram-Secret"] = config.botSecret;
 
-    const res = await fetch(`${config.apiUrl}${path}`, {
+    const base = (apiUrl || config.apiUrl).replace(/\/$/, "");
+    const res = await fetch(`${base}${path}`, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(12_000),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) {
@@ -36,16 +47,16 @@ export function createApi(config) {
   }
 
   return {
-    health: () => request("/api/health"),
+    health: (apiUrl) => request("/api/health", { apiUrl }),
     telegramAuth: (payload) => request("/api/auth/telegram", { method: "POST", body: payload }),
     login: (payload) => request("/api/auth/login", { method: "POST", body: payload }),
     me: (token) => request("/api/auth/me", { token }),
-    matches: (params = {}) => {
+    matches: (params = {}, extra = {}) => {
       const q = new URLSearchParams();
       if (params.upcoming) q.set("upcoming", "1");
       if (params.date) q.set("date", params.date);
       q.set("category", "football");
-      return request(`/api/sports/matches?${q}`);
+      return request(`/api/sports/matches?${q}`, extra);
     },
     matchPredictions: (token, id) =>
       request(`/api/sports/matches/${encodeURIComponent(id)}/predictions`, { token }),

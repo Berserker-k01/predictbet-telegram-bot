@@ -1,14 +1,34 @@
 const TIMEZONE = "Europe/Paris";
 
+function lastSundayUtc(year, monthIndex) {
+  const d = new Date(Date.UTC(year, monthIndex + 1, 0, 1, 0, 0));
+  d.setUTCDate(d.getUTCDate() - d.getUTCDay());
+  return d.getTime();
+}
+
+function parisOffsetMs(d) {
+  const y = d.getUTCFullYear();
+  const start = lastSundayUtc(y, 2);
+  const end = lastSundayUtc(y, 9);
+  const t = d.getTime();
+  return (t >= start && t < end ? 2 : 1) * 3_600_000;
+}
+
 export function ymd(value, timeZone = TIMEZONE) {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return "";
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(d);
+  try {
+    const out = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(d);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(out)) return out;
+  } catch {
+    /* ICU / tzdata manquant dans Alpine */
+  }
+  return new Date(d.getTime() + parisOffsetMs(d)).toISOString().slice(0, 10);
 }
 
 export function shiftYmd(ymdStr, days) {

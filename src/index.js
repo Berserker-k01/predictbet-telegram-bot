@@ -3,8 +3,8 @@ import { dirname, join } from "path";
 import { randomBytes } from "crypto";
 import "./load-env.js";
 import { Bot } from "grammy";
-import { loadConfig } from "./config.js";
-import { createApi, ApiError, extractAuth } from "./api.js";
+import { loadConfig, apiUrlFallbacks } from "./config.js";
+import { createApi, ApiError, extractAuth, extractMatches } from "./api.js";
 import { createSessionStore, initialSession } from "./session-store.js";
 import { createStore } from "./store.js";
 import { createTchin } from "./tchin.js";
@@ -68,7 +68,7 @@ const tchin = createTchin(config, store, {
   },
 });
 let botUsername = "";
-let matchCache = { at: 0, list: [] };
+let matchCache = { at: 0, list: [], error: null };
 
 function sess(ctx) {
   const id = ctx.from?.id;
@@ -203,15 +203,25 @@ async function loadUpcoming(force = false) {
   if (!force && matchCache.list.length && Date.now() - matchCache.at < config.cacheMs) {
     return matchCache.list;
   }
-  try {
-    const data = await api.matches({ upcoming: true });
-    const list = upcoming(data.matches || data.data?.matches || []);
-    matchCache = { at: Date.now(), list };
-    return list;
-  } catch (e) {
-    console.warn("matches:", e.message);
-    return matchCache.list || [];
+  let lastError = null;
+  for (const apiUrl of apiUrlFallbacks(config.apiUrl)) {
+    try {
+      const data = await api.matches({ upcoming: true }, { apiUrl });
+      const list = upcoming(extractMatches(data));
+      if (apiUrl !== config.apiUrl) {
+        config.apiUrl = apiUrl;
+        console.warn(`API matchs via ${apiUrl} (${list.length})`);
+      }
+      matchCache = { at: Date.now(), list, error: null };
+      return list;
+    } catch (e) {
+      lastError = e;
+      console.warn(`matches ${apiUrl}:`, e.message);
+    }
   }
+  if (matchCache.list.length) return matchCache.list;
+  matchCache = { at: Date.now(), list: [], error: lastError?.message || "injoignable" };
+  return [];
 }
 
 function browseList(all, view) {
@@ -369,6 +379,7 @@ async function showLeagues(ctx) {
 }
 
 function listIntro(lang, view, leagueName) {
+  if (view.soon) return t(lang, "stepSoon");
   if (view.sort === "confidence") return t(lang, "stepTops");
   if (view.scope === "today") return t(lang, "stepToday");
   if (view.scope === "live") return t(lang, "stepLive");
@@ -391,7 +402,20 @@ async function showList(ctx, patch = {}) {
     page: patch.page ?? (patch.scope || patch.league !== undefined || patch.sort ? 0 : prev.page),
   });
   const all = await loadUpcoming();
-  const list = browseList(all, view);
+  if (!all.length && matchCache.error) {
+    await editOrReply(ctx, t(lang, "matchesLoadError"), menuKeyboard(lang));
+    return;
+  }
+  let list = browseList(all, view);
+  let intro = { ...view };
+  if (!list.length && !view.league && view.scope !== "live") {
+    const fallback = sortMatches(all, view.sort === "confidence" ? "confidence" : "time");
+    if (fallback.length) {
+      list = fallback;
+      intro = { ...view, soon: true, scope: "all" };
+      setView(ctx, { scope: "all" });
+    }
+  }
   const emptyKey =
     view.scope === "live" ? "noLive" : view.league ? "noLeague" : view.scope === "today" ? "noToday" : "noMatches";
   if (!list.length) {
@@ -405,7 +429,7 @@ async function showList(ctx, patch = {}) {
     .map((m, i) => listEntry(m, p * config.pageSize + i + 1, lang, whenText))
     .join("\n\n");
   const text =
-    listIntro(lang, { ...view, page: p }, leagueName) +
+    listIntro(lang, { ...intro, page: p }, leagueName) +
     t(lang, "stepCount", { count: list.length, page: p + 1, pages }) +
     `\n\n${body}`;
   await editOrReply(ctx, text, listKeyboard(lang, slice, p, pages, config.pageSize));
@@ -990,8 +1014,10 @@ async function start() {
     const h = await api.health();
     console.log(`API Predictbet OK (db=${h.database}) → ${config.apiUrl}`);
   } catch (e) {
-    console.warn(`API injoignable (${config.apiUrl}): ${e.message}`);
+    console.warn(`API health (${config.apiUrl}): ${e.message}`);
   }
+  const bootList = await loadUpcoming(true);
+  console.log(`Matchs chargés : ${bootList.length} (${config.apiUrl})`);
 
   const me = await bot.api.getMe();
   botUsername = me.username;

@@ -4,12 +4,15 @@ services:
     container_name: predictbet-bot
     restart: unless-stopped
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8788:8788"
     volumes:
       - ./data:/app/data
     environment:
       ADMIN_PORT: "8788"
+      TZ: Europe/Paris
       SESSION_FILE: "./data/sessions.json"
       ADMIN_STORE_FILE: "./data/admin.json"
     healthcheck:

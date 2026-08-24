@@ -7,9 +7,29 @@ export function esc(s) {
     .replaceAll(">", "&gt;");
 }
 
+function kickoffIso(m) {
+  const raw = m?.dateIso || m?.utcDate || m?.kickoff || m?.startAt || "";
+  if (raw) {
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  const st = String(m?.status || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(st)) {
+    const d = new Date(st.replace(" ", "T"));
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+  }
+  return raw || "";
+}
+
 export function upcoming(matches = []) {
   const done = new Set(["FINISHED", "AWARDED", "CANCELLED"]);
   return matches
+    .map((m) => {
+      const dateIso = kickoffIso(m) || m.dateIso;
+      const st = String(m.status ?? "");
+      const status = /^\d{4}-\d{2}-\d{2}/.test(st) ? "TIMED" : m.status;
+      return { ...m, dateIso, status };
+    })
     .filter((m) => !done.has(String(m.status ?? "").toUpperCase()))
     .sort((a, b) => new Date(a.dateIso || 0) - new Date(b.dateIso || 0));
 }

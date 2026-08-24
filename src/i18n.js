@@ -35,6 +35,8 @@ const FR = {
     "🏆 <b>{league}</b>\n\nLes matchs de cette compétition. Tape un numéro.",
   stepAll:
     "⚽ <b>Programme</b>\n\nLes prochains matchs. Tape un numéro, je m'en occupe.",
+  stepSoon:
+    "📅 <b>Prochains matchs</b>\n\nRien de prévu aujourd'hui. Voici la suite. Tape un numéro, je te fais l'analyse.",
   stepCount: "\n\n{count} matchs · page {page}/{pages}",
   stepAnalysis: "",
   aiThinking: "L'IA regarde <b>{home} vs {away}</b>… une seconde.",
@@ -43,6 +45,7 @@ const FR = {
   aiFooter: "",
   noMatches: "Là, j'ai rien à venir. Repasse un peu plus tard.",
   noToday: "Rien aujourd'hui. Prends une compétition, ou reviens au menu.",
+  matchesLoadError: "Je n'arrive pas à charger les matchs. Réessaie dans un moment.",
   noLive: "Personne en live pour le moment.",
   noLeague: "Pas de match dans cette compétition pour l'instant.",
   matchInfo: "<b>{home} vs {away}</b>\n🏆 {league}{round}\n🕒 {when}",
@@ -218,9 +221,12 @@ const EN = {
     "🏆 <b>{league}</b>\n\nMatches in this competition. Tap a number to open the analysis.",
   stepAll:
     "⚽ <b>Fixtures</b>\n\nUpcoming matches. Tap a number to open the analysis.",
+  stepSoon:
+    "📅 <b>Upcoming</b>\n\nNothing today. Here are the next fixtures. Tap a number for the analysis.",
   stepCount: "\n\n{count} matches · page {page}/{pages}",
   noMatches: "No upcoming matches right now. Please try again later.",
   noToday: "No matches scheduled today. Choose a competition, or return to the menu.",
+  matchesLoadError: "I can't load the matches right now. Please try again in a moment.",
   noLive: "No live matches at the moment.",
   noLeague: "No matches in this competition right now.",
   matchInfo: "<b>{home} vs {away}</b>\n🏆 {league}{round}\n🕒 {when}",
@@ -308,10 +314,13 @@ const ES = {
     "🏆 <b>{league}</b>\n\nPartidos de esta competición. Toca un número para abrir el análisis.",
   stepAll:
     "⚽ <b>Calendario</b>\n\nPróximos partidos. Toca un número para abrir el análisis.",
+  stepSoon:
+    "📅 <b>Próximos</b>\n\nNada hoy. Aquí van los siguientes. Toca un número para el análisis.",
   stepCount: "\n\n{count} partidos · pág. {page}/{pages}",
   stepAnalysis: "🔥 <b>Análisis</b>\n\n",
   noMatches: "No hay partidos próximos. Inténtelo un poco más tarde.",
   noToday: "No hay partidos hoy. Elija una competición o vuelva al menú.",
+  matchesLoadError: "No puedo cargar los partidos. Inténtalo en un momento.",
   noLive: "No hay partidos en directo.",
   noLeague: "No hay partidos en esta competición.",
   matchInfo: "<b>{home} vs {away}</b>\n🏆 {league}{round}\n🕒 {when}",
@@ -382,10 +391,13 @@ const RU = {
     "🏆 <b>{league}</b>\n\nМатчи этого турнира. Нажми номер, чтобы открыть анализ.",
   stepAll:
     "⚽ <b>Сетка</b>\n\nБлижайшие матчи. Нажми номер, чтобы открыть анализ.",
+  stepSoon:
+    "📅 <b>Ближайшие</b>\n\nСегодня пусто. Вот следующие матчи. Нажми номер для анализа.",
   stepCount: "\n\n{count} матчей · стр. {page}/{pages}",
   stepAnalysis: "🔥 <b>Анализ</b>\n\n",
   noMatches: "Ближайших матчей нет. Попробуйте позже.",
   noToday: "Сегодня матчей нет. Выберите турнир или вернитесь в меню.",
+  matchesLoadError: "Не удаётся загрузить матчи. Попробуй чуть позже.",
   noLive: "Сейчас нет матчей в прямом эфире.",
   noLeague: "В этом турнире пока нет матчей.",
   matchInfo: "<b>{home} vs {away}</b>\n🏆 {league}{round}\n🕒 {when}",
