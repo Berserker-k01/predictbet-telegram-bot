@@ -203,9 +203,15 @@ async function loadUpcoming(force = false) {
   if (!force && matchCache.list.length && Date.now() - matchCache.at < config.cacheMs) {
     return matchCache.list;
   }
-  const data = await api.matches({ upcoming: true });
-  matchCache = { at: Date.now(), list: upcoming(data.matches || []) };
-  return matchCache.list;
+  try {
+    const data = await api.matches({ upcoming: true });
+    const list = upcoming(data.matches || data.data?.matches || []);
+    matchCache = { at: Date.now(), list };
+    return list;
+  } catch (e) {
+    console.warn("matches:", e.message);
+    return matchCache.list || [];
+  }
 }
 
 function browseList(all, view) {
@@ -852,18 +858,24 @@ async function handleAuthText(ctx, text, lang, s) {
       });
       await applyLogin(ctx, s.pendingEmail, text);
       await html(ctx, t(lang, "regOk"));
-      await showMenu(ctx);
     } catch (e) {
       if (e.code === "ALREADY_REGISTERED") {
         autoLoginFromTelegram(ctx);
         await html(ctx, t(lang, "regAlready"));
-        await showMenu(ctx);
       } else if (e.code === "EMAIL_TAKEN") {
         sessions.patch(ctx.from.id, { flow: "register_email" });
         await html(ctx, t(lang, "regEmailTaken"));
+        return true;
       } else {
         await html(ctx, authErrorText(lang, e));
+        return true;
       }
+    }
+    try {
+      await showMenu(ctx);
+    } catch (e) {
+      console.warn("menu after register:", e.message);
+      await html(ctx, t(lang, "menuHello"), { reply_markup: menuKeyboard(lang) });
     }
     return true;
   }
@@ -897,26 +909,31 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith("/")) return;
   const lang = langOf(ctx);
-  const s = sess(ctx);
+  try {
+    const s = sess(ctx);
 
-  if (isAuthFlow(s.flow) || s.flow === "link_email" || s.flow === "link_pass") {
-    await handleAuthText(ctx, text, lang, s);
-    return;
-  }
+    if (isAuthFlow(s.flow) || s.flow === "link_email" || s.flow === "link_pass") {
+      await handleAuthText(ctx, text, lang, s);
+      return;
+    }
 
-  if (!loggedIn(s) && autoLoginFromTelegram(ctx)) {
+    if (!loggedIn(s) && autoLoginFromTelegram(ctx)) {
+      await showMenu(ctx);
+      return;
+    }
+
+    if (!loggedIn(sess(ctx))) {
+      await showWelcome(ctx);
+      return;
+    }
+
+    if (/^\d+$/.test(text) && (await openListedNumber(ctx, Number(text)))) return;
+    if (await handleMenu(ctx, text, lang)) return;
     await showMenu(ctx);
-    return;
+  } catch (e) {
+    console.warn("message:", e.message);
+    await html(ctx, t(lang, "menuHello"), { reply_markup: menuKeyboard(lang) });
   }
-
-  if (!loggedIn(sess(ctx))) {
-    await showWelcome(ctx);
-    return;
-  }
-
-  if (/^\d+$/.test(text) && (await openListedNumber(ctx, Number(text)))) return;
-  if (await handleMenu(ctx, text, lang)) return;
-  await showMenu(ctx);
 });
 
 async function reminderTick() {
