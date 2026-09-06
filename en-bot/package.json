@@ -1,0 +1,17 @@
+{
+  "name": "predictbet-telegram-bot-en",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Predictbet Telegram bot (English) — AI analyses, admin panel, Paystack payments",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "grammy": "^1.35.0"
+  }
+}

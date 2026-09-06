@@ -2,3 +2,8 @@ node_modules/
 data/sessions.json
 data/admin.json
 .env
+video/
+en-bot/.env
+en-bot/data/
+en-bot/node_modules/
+

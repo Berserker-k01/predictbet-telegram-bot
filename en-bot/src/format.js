@@ -74,7 +74,7 @@ export function pickLabel(m, langPick) {
   return `${langPick.away} ${loss}%`;
 }
 
-export function whenText(m, lang = "fr") {
+export function whenText(m, lang = "en") {
   if (m.live) return "LIVE";
   const iso = m.dateIso;
   if (!iso) return `${m.date ?? ""} ${m.time ?? ""}`.trim();
@@ -94,7 +94,7 @@ export function pctBar(pct) {
   return `${"█".repeat(filled)}${"░".repeat(10 - filled)}`;
 }
 
-export function timeShort(m, lang = "fr") {
+export function timeShort(m, lang = "en") {
   if (m.live) return "LIVE";
   if (!m.dateIso) return m.time || "";
   const d = new Date(m.dateIso);
@@ -128,10 +128,10 @@ export function isZeroDecimal(currency) {
   return ["XOF", "XAF", "JPY", "KRW"].includes(String(currency || "").toUpperCase());
 }
 
-export function formatMoney(amount, currency = "XOF", lang = "fr") {
+export function formatMoney(amount, currency = "NGN", lang = "en") {
   const n = Number(amount) || 0;
   const major = isZeroDecimal(currency) ? n : n / 100;
-  const loc = lang === "en" ? "en-GB" : lang === "es" ? "es-ES" : lang === "ru" ? "ru-RU" : "fr-FR";
+  const loc = lang === "en" ? "en-NG" : lang === "es" ? "es-ES" : lang === "ru" ? "ru-RU" : "fr-FR";
   try {
     return new Intl.NumberFormat(loc, { style: "currency", currency, maximumFractionDigits: isZeroDecimal(currency) ? 0 : 2 }).format(major);
   } catch {
@@ -139,7 +139,7 @@ export function formatMoney(amount, currency = "XOF", lang = "fr") {
   }
 }
 
-export function priceLabel(cents, { currency = "XOF", interval, lang = "fr" } = {}) {
+export function priceLabel(cents, { currency = "NGN", interval, lang = "en" } = {}) {
   const n = Number(cents) || 0;
   const free = { fr: "Gratuit", en: "Free", es: "Gratis", ru: "Бесплатно" };
   if (n <= 0) return free[lang] || free.fr;
