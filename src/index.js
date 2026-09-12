@@ -258,7 +258,8 @@ function hasAccess(ctx) {
   const u = currentUser(ctx);
   if (!u) return false;
   const sub = store.activeSubForUser(u.id);
-  return Boolean(sub && (sub.status === "active" || sub.status === "trialing"));
+  if (sub && (sub.status === "active" || sub.status === "trialing")) return true;
+  return Number(u.credits) > 0;
 }
 
 async function showWelcome(ctx) {
@@ -546,15 +547,20 @@ async function showProfile(ctx) {
   const local = currentUser(ctx);
   const sub = local ? store.activeSubForUser(local.id) : null;
   const u = local || s.user || {};
+  const credits = Number(local?.credits || 0);
+  const planLabel = sub?.planName || (credits > 0 ? "crédits admin" : t(lang, "noAccessPlan"));
+  const quota = sub
+    ? `Jusqu'au ${new Date(sub.currentPeriodEnd).toLocaleDateString("fr-FR")}`
+    : credits > 0
+      ? `${credits} crédit${credits > 1 ? "s" : ""} — l'analyse est ouverte.`
+      : "Prends un accès pour utiliser le bot.";
   await editOrReply(
     ctx,
     t(lang, "profile", {
       name: esc(u.displayName || u.email || ctx.from.first_name),
-      plan: esc(sub?.planName || t(lang, "noAccessPlan")),
+      plan: esc(planLabel),
       credits: "",
-      quota: sub
-        ? `Jusqu'au ${new Date(sub.currentPeriodEnd).toLocaleDateString("fr-FR")}`
-        : "Prends un accès pour utiliser le bot.",
+      quota,
     }),
     profileMarkup(lang, sessions.get(ctx.from.id) || s),
   );
