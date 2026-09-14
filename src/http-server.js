@@ -227,7 +227,7 @@ export function startHttpServer({ config, store, tchin, publicDir }) {
       const body = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       const user = store.updateUser(path.split("/").pop(), body);
       if (!user) json(res, 404, { ok: false, error: "Utilisateur introuvable" });
-      else json(res, 200, { ok: true, user });
+      else json(res, 200, { ok: true, user, subscription: store.activeSubForUser(user.id) });
       return true;
     }
     if (path === "/api/admin/users" && method === "POST") {
@@ -261,7 +261,12 @@ export function startHttpServer({ config, store, tchin, publicDir }) {
     if (path === "/api/admin/subscriptions" && method === "POST") {
       const body = JSON.parse((await readBody(req)).toString("utf8") || "{}");
       const plan = store.getPlan(body.planId || body.planCode);
-      const sub = store.activateSubscription({ userId: body.userId, plan, provider: "admin" });
+      const sub = store.activateSubscription({
+        userId: body.userId,
+        plan,
+        provider: "tchin",
+        cancelAtPeriodEnd: false,
+      });
       if (!sub) json(res, 400, { ok: false, error: "Utilisateur ou plan invalide" });
       else json(res, 201, { ok: true, subscription: sub });
       return true;

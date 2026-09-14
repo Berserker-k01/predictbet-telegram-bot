@@ -141,7 +141,11 @@ async function editUser(id) {
     <p class="muted">Telegram ${u.telegramId || "—"} · ${u.email || "pas d'email"}</p>
     <label>Nom<input id="displayName" value="${u.displayName || ""}"/></label>
     <label>Email<input id="email" value="${u.email || ""}"/></label>
-    <label>Plan<select id="planCode">${plans.map((p) => `<option value="${p.code}" ${p.code === u.planCode ? "selected" : ""}>${p.name}</option>`).join("")}</select></label>
+    <label>Abonnement<select id="planCode">
+      <option value="" ${!u.planCode ? "selected" : ""}>Aucun accès</option>
+      ${plans.map((p) => `<option value="${p.code}" ${p.code === u.planCode ? "selected" : ""}>${p.name}</option>`).join("")}
+    </select></label>
+    ${d.subscription ? `<p class="muted">En cours : ${d.subscription.planName} · jusqu'au ${when(d.subscription.currentPeriodEnd)}</p>` : ""}
     <label>Crédits<input id="credits" type="number" value="${u.credits ?? 0}"/></label>
     <label>Statut<select id="status">
       ${["active", "banned", "disabled"].map((s) => `<option ${u.status === s ? "selected" : ""}>${s}</option>`).join("")}

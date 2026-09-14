@@ -58,9 +58,9 @@ export function createApi(config) {
       q.set("category", "football");
       return request(`/api/sports/matches?${q}`, extra);
     },
-    matchPredictions: (token, id) =>
+    matchPredictions: (id, token) =>
       request(`/api/sports/matches/${encodeURIComponent(id)}/predictions`, { token }),
-    matchDetail: (token, id) =>
+    matchDetail: (id, token) =>
       request(`/api/sports/matches/${encodeURIComponent(id)}`, { token }),
     credits: (token) => request("/api/wallet/credits", { token }),
     referral: (token) => request("/api/wallet/referral", { token }),

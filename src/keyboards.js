@@ -96,6 +96,16 @@ export function langKeyboard() {
   return kb;
 }
 
+export function referralKeyboard(lang, link) {
+  const kb = new InlineKeyboard();
+  if (link && /^https:\/\//i.test(link)) {
+    const share = `https://t.me/share/url?url=${encodeURIComponent(link)}`;
+    kb.url(t(lang, "btnShareRef"), share).row();
+  }
+  kb.text(t(lang, "back"), "profile");
+  return kb;
+}
+
 export function plansKeyboard(lang, plans, priceFn) {
   const kb = new InlineKeyboard();
   for (const p of plans) {

@@ -176,6 +176,11 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
     return { created: false, email, password: null, user: publicUser(admin) };
   }
 
+  function makeInviteCode(u) {
+    if (u.telegramId) return `pb${Number(u.telegramId).toString(36)}`;
+    return `pb${String(u.id || "").replace(/[^a-z0-9]/gi, "").slice(-10) || nid("r").slice(-8)}`;
+  }
+
   function publicUser(u) {
     if (!u) return null;
     const { passwordHash, ...rest } = u;
@@ -289,8 +294,31 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
         if (extra.email) u.email = extra.email;
         if (extra.lang) u.lang = extra.lang;
       }
+      if (!u.inviteCode) u.inviteCode = makeInviteCode(u);
       schedule();
       return publicUser(u);
+    },
+    ensureInviteCode(id) {
+      const u = findUser(id);
+      if (!u) return null;
+      if (!u.inviteCode) {
+        u.inviteCode = makeInviteCode(u);
+        u.updatedAt = nowIso();
+        schedule();
+      }
+      return publicUser(u);
+    },
+    listInvitees(inviteCode) {
+      const code = String(inviteCode || "").trim();
+      if (!code) return [];
+      return state.users
+        .filter(
+          (u) =>
+            u.role !== "admin" &&
+            String(u.inviteCode || "") !== code &&
+            (String(u.referredBy || "") === code || String(u.referralCode || "") === code),
+        )
+        .map(publicUser);
     },
     touchUser(id) {
       const u = findUser(id);
@@ -345,7 +373,12 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
       u.telegramId = telegramId;
       u.username = from.username || u.username || null;
       u.lang = lang || u.lang || "fr";
-      u.referralCode = referralCode || u.referralCode || null;
+      if (!u.inviteCode) u.inviteCode = makeInviteCode(u);
+      const invitedBy = String(referralCode || "").trim();
+      if (invitedBy && invitedBy !== u.inviteCode) {
+        u.referredBy = u.referredBy || invitedBy;
+        u.referralCode = u.referralCode || invitedBy;
+      }
       u.updatedAt = t;
       u.lastSeenAt = t;
       u.registeredAt = t;
@@ -372,6 +405,10 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
       u.updatedAt = nowIso();
       schedule();
       audit("user.login", { id: u.id, telegramId });
+      if (!u.inviteCode) {
+        u.inviteCode = makeInviteCode(u);
+        schedule();
+      }
       return publicUser(u);
     },
     updateUser(id, patch) {
@@ -381,7 +418,6 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
         "email",
         "displayName",
         "status",
-        "planCode",
         "credits",
         "notes",
         "role",
@@ -394,7 +430,10 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
       u.updatedAt = nowIso();
       schedule();
       audit("user.update", { id: u.id, patch: Object.keys(patch) });
-      return publicUser(u);
+      if (patch.planCode !== undefined) {
+        api.applyUserPlan(u.id, String(patch.planCode || "").trim());
+      }
+      return publicUser(findUser(u.id));
     },
     listPlans({ all = false } = {}) {
       return [...state.plans]
@@ -498,6 +537,40 @@ export function createStore(filePath, { adminEmail, adminPassword } = {}) {
       schedule();
       audit("sub.activate", { subId: sub.id, userId: user.id, plan: plan.code });
       return sub;
+    },
+    applyUserPlan(userId, planCode) {
+      const user = findUser(userId);
+      if (!user) return null;
+      const code = String(planCode || "").trim();
+      if (!code) {
+        const t = nowIso();
+        for (const s of state.subscriptions) {
+          if (s.userId === user.id && (s.status === "active" || s.status === "trialing")) {
+            s.status = "canceled";
+            s.updatedAt = t;
+          }
+        }
+        user.planCode = "";
+        user.updatedAt = t;
+        schedule();
+        audit("sub.revoke", { userId: user.id });
+        return null;
+      }
+      const plan = api.getPlan(code);
+      if (!plan) return api.activeSubForUser(user.id);
+      const current = api.activeSubForUser(user.id);
+      if (current && current.planCode === plan.code && current.status === "active") {
+        user.planCode = plan.code;
+        user.updatedAt = nowIso();
+        schedule();
+        return current;
+      }
+      return api.activateSubscription({
+        userId: user.id,
+        plan,
+        provider: "tchin",
+        cancelAtPeriodEnd: false,
+      });
     },
     patchSubscription(id, patch) {
       const s = state.subscriptions.find((x) => x.id === id);

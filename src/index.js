@@ -9,7 +9,7 @@ import { createSessionStore, initialSession } from "./session-store.js";
 import { createStore } from "./store.js";
 import { createTchin } from "./tchin.js";
 import { startHttpServer } from "./http-server.js";
-import { sleep, signals } from "./analysis.js";
+import { sleep, signals, resolvePrediction, mergeMatchDetail } from "./analysis.js";
 import { t } from "./i18n.js";
 import { resolveStadium, resolveReferee } from "./venues.js";
 import {
@@ -38,6 +38,7 @@ import {
   matchDetailKeyboard,
   profileKeyboard,
   langKeyboard,
+  referralKeyboard,
   plansKeyboard,
   payKeyboard,
   welcomeKeyboard,
@@ -257,7 +258,11 @@ function trackUser(ctx) {
 function hasAccess(ctx) {
   const u = currentUser(ctx);
   if (!u) return false;
-  const sub = store.activeSubForUser(u.id);
+  let sub = store.activeSubForUser(u.id);
+  if (!sub && u.planCode) {
+    store.applyUserPlan(u.id, u.planCode);
+    sub = store.activeSubForUser(u.id);
+  }
   if (sub && (sub.status === "active" || sub.status === "trialing")) return true;
   return Number(u.credits) > 0;
 }
@@ -335,11 +340,14 @@ function analysisBlock(lang, m, extraMarkets = "") {
   const lines = [
     t(lang, "analysisTitle"),
     sentence,
+  ];
+  if (p.score) lines.push(t(lang, "predScore", { score: esc(p.score) }));
+  lines.push(
     "",
     `${home}  ${p.win ?? "—"}%  ${pctBar(p.win)}`,
     `${t(lang, "drawLabel")}  ${p.draw ?? "—"}%  ${pctBar(p.draw)}`,
     `${away}  ${p.loss ?? "—"}%  ${pctBar(p.loss)}`,
-  ];
+  );
   const hxg = Number(m.home?.xg);
   const axg = Number(m.away?.xg);
   if (Number.isFinite(hxg) && Number.isFinite(axg)) {
@@ -458,10 +466,10 @@ async function showMatch(ctx, id) {
   const pool = browseList(all, browseView);
   const listed = findMatch(pool, id).match || findMatch(all, id).match;
   if (!listed) {
-    await editOrReply(ctx, t(lang, "noMatches"));
+    await ctx.reply(t(lang, "noMatches"), { parse_mode: "HTML" });
     return;
   }
-  const match = {
+  let match = {
     ...listed,
     home: listed.home,
     away: listed.away,
@@ -469,48 +477,72 @@ async function showMatch(ctx, id) {
   };
   setView(ctx, { screen: "match", matchId: listed.id, from: from || "list" });
 
-  await editOrReply(
-    ctx,
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.answerCallbackQuery();
+    } catch {
+      /* */
+    }
+  }
+
+  const thinking = await ctx.reply(
     t(lang, "aiThinking", {
       home: esc(match.home?.name),
       away: esc(match.away?.name),
     }),
+    { parse_mode: "HTML" },
   );
   try {
     await ctx.api.sendChatAction(ctx.chat.id, "typing");
   } catch {
     /* */
   }
-  await sleep(1100 + Math.floor(Math.random() * 700));
+  await sleep(800 + Math.floor(Math.random() * 500));
 
   let extra = "";
-  if (s.token) {
-    try {
-      const data = await api.matchPredictions(s.token, listed.id);
-      if (data.probs) {
-        match.predictionPreview = {
-          ...(match.predictionPreview || {}),
-          win: data.probs.win,
-          draw: data.probs.draw,
-          loss: data.probs.loss,
-          confidence: data.confidence ?? match.predictionPreview?.confidence,
-        };
-      }
-      extra = (data.markets || [])
+  try {
+    const detail = await api.matchDetail(listed.id, s.token || undefined);
+    match = mergeMatchDetail(match, detail);
+  } catch {
+    /* liste locale suffit */
+  }
+  try {
+    const data = await api.matchPredictions(listed.id, s.token || undefined);
+    if (data.markets?.length) {
+      extra = data.markets
         .slice(0, 6)
         .map((mk) => `• ${esc(mk.label)} — ${mk.pct}%`)
         .join("\n");
-    } catch (e) {
-      if (e instanceof ApiError && (e.status === 402 || e.code === "INSUFFICIENT_CREDITS")) {
-        await editOrReply(ctx, t(lang, "creditsLow"));
-        return;
-      }
     }
+    match.predictionPreview = resolvePrediction(match, data);
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 402 || e.code === "INSUFFICIENT_CREDITS")) {
+      try {
+        await ctx.api.editMessageText(ctx.chat.id, thinking.message_id, t(lang, "creditsLow"), {
+          parse_mode: "HTML",
+        });
+      } catch {
+        await ctx.reply(t(lang, "creditsLow"), { parse_mode: "HTML" });
+      }
+      return;
+    }
+    match.predictionPreview = resolvePrediction(match);
+  }
+  if (!match.predictionPreview?.win && !match.predictionPreview?.draw) {
+    match.predictionPreview = resolvePrediction(match);
   }
 
   const text = `${t(lang, "stepAnalysis")}${matchCard(lang, match)}\n\n${analysisBlock(lang, match, extra)}`;
   const nav = neighbors(pool.length ? pool : all, listed.id);
-  await editOrReply(ctx, text, matchDetailKeyboard(lang, listed, { prev: nav.prev, next: nav.next }));
+  const markup = matchDetailKeyboard(lang, listed, { prev: nav.prev, next: nav.next });
+  try {
+    await ctx.api.editMessageText(ctx.chat.id, thinking.message_id, text, {
+      parse_mode: "HTML",
+      reply_markup: markup,
+    });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: markup });
+  }
 }
 
 async function goBack(ctx) {
@@ -547,13 +579,10 @@ async function showProfile(ctx) {
   const local = currentUser(ctx);
   const sub = local ? store.activeSubForUser(local.id) : null;
   const u = local || s.user || {};
-  const credits = Number(local?.credits || 0);
-  const planLabel = sub?.planName || (credits > 0 ? "crédits admin" : t(lang, "noAccessPlan"));
+  const planLabel = sub?.planName || t(lang, "noAccessPlan");
   const quota = sub
     ? `Jusqu'au ${new Date(sub.currentPeriodEnd).toLocaleDateString("fr-FR")}`
-    : credits > 0
-      ? `${credits} crédit${credits > 1 ? "s" : ""} — l'analyse est ouverte.`
-      : "Prends un accès pour utiliser le bot.";
+    : "Prends un accès pour utiliser le bot.";
   await editOrReply(
     ctx,
     t(lang, "profile", {
@@ -570,24 +599,37 @@ async function showReferral(ctx) {
   if (!(await requireLogin(ctx))) return;
   const lang = langOf(ctx);
   const s = await requireSession(ctx);
-  if (!loggedIn(s)) {
+  const local = currentUser(ctx) || trackUser(ctx);
+  if (!local) {
     await editOrReply(ctx, t(lang, "needLogin"), profileMarkup(lang, s));
     return;
   }
-  if (!s.token) {
-    await editOrReply(ctx, t(lang, "familyEmpty"), profileMarkup(lang, s));
-    return;
+  const u = store.ensureInviteCode(local.id) || local;
+  const code = u.inviteCode || "";
+  const link = botUsername && code ? `https://t.me/${botUsername}?start=${encodeURIComponent(code)}` : "";
+  let count = store.listInvitees(code).length;
+  let credits = 0;
+  let family = store.listInvitees(code).map((f) => ({
+    name: f.displayName || f.username || f.email || f.telegramId,
+    creditsEarned: 0,
+  }));
+  if (s.token) {
+    try {
+      const data = await api.referral(s.token);
+      const r = data.referral || {};
+      if (r.familyCount != null) count = Math.max(count, Number(r.familyCount) || 0);
+      credits = r.creditsFromReferrals ?? credits;
+      if (Array.isArray(r.family) && r.family.length) family = r.family;
+    } catch {
+      /* lien local suffit */
+    }
   }
-  const data = await api.referral(s.token);
-  const r = data.referral || {};
-  const link = botUsername ? `https://t.me/${botUsername}?start=${r.code}` : r.code;
   let text = t(lang, "referral", {
-    code: esc(r.code),
-    link: esc(link),
-    count: r.familyCount ?? 0,
-    credits: r.creditsFromReferrals ?? 0,
+    code: esc(code || "—"),
+    link: esc(link || code || "—"),
+    count,
+    credits,
   });
-  const family = r.family || [];
   text += "\n\n";
   if (!family.length) text += t(lang, "familyEmpty");
   else {
@@ -596,7 +638,7 @@ async function showReferral(ctx) {
       .map((f) => t(lang, "familyRow", { name: esc(f.name), credits: f.creditsEarned ?? 0 }))
       .join("\n");
   }
-  await editOrReply(ctx, text, profileMarkup(lang, s));
+  await editOrReply(ctx, text, referralKeyboard(lang, link));
 }
 
 async function showPlans(ctx) {
