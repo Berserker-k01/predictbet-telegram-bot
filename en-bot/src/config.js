@@ -74,6 +74,9 @@ export function loadConfig() {
     cacheMs: 45_000,
     freePreview: 3,
     paidPlans: new Set(["weekly", "pro", "pro_plus", "annual", "enterprise"]),
+    oddsApiKey: process.env.ODDS_API_KEY || "",
+    oddsRegion: process.env.ODDS_REGION || "eu",
+    footballDataToken: process.env.FOOTBALL_DATA_TOKEN || "",
     paystack: {
       apiUrl: (process.env.PAYSTACK_API_URL || "https://api.paystack.co").replace(/\/$/, ""),
       publicKey: process.env.PAYSTACK_PUBLIC_KEY || "",

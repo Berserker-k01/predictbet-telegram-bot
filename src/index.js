@@ -10,7 +10,7 @@ import { createStore } from "./store.js";
 import { createTchin } from "./tchin.js";
 import { startHttpServer } from "./http-server.js";
 import { sleep, signals, resolvePrediction, mergeMatchDetail } from "./analysis.js";
-import { predictMatch } from "./model.js";
+import { predictFixture, refreshEngine } from "./engine.js";
 import { t } from "./i18n.js";
 import { resolveStadium, resolveReferee } from "./venues.js";
 import {
@@ -240,9 +240,11 @@ async function fetchMatchBundle(apiUrl) {
     for (const raw of extractMatches(r.value)) mergeMatchRows(map, raw);
   }
   if (!anyOk) throw lastError || new Error("matches injoignable");
-  return upcoming([...map.values()]).map((m) => {
+  const list = upcoming([...map.values()]);
+  await refreshEngine(config, list);
+  return list.map((m) => {
     if (m.finished || m.cancelled) return m;
-    return { ...m, predictionPreview: predictMatch(m) };
+    return { ...m, predictionPreview: predictFixture(m) };
   });
 }
 
@@ -419,8 +421,28 @@ function analysisBlock(lang, m, extraMarkets = "") {
     `${t(lang, "drawLabel")}  ${p.draw ?? "—"}%  ${pctBar(p.draw)}`,
     `${away}  ${p.loss ?? "—"}%  ${pctBar(p.loss)}`,
   );
-  if (p.topMarket != null && Number(p.topMarket) !== 73) {
-    lines.push(t(lang, "topMarket", { pct: p.topMarket }));
+  if (p.market) {
+    lines.push(
+      "",
+      t(lang, "marketLine", {
+        home,
+        away,
+        hp: p.market.win,
+        dp: p.market.draw,
+        ap: p.market.loss,
+      }),
+    );
+    if (Number.isFinite(p.edge) && Math.abs(p.edge) >= 4) {
+      const pick =
+        p.edge > 0
+          ? p.win >= p.draw && p.win >= p.loss
+            ? home
+            : p.loss >= p.draw
+              ? away
+              : t(lang, "drawLabel")
+          : "";
+      if (pick) lines.push(t(lang, "edgeLine", { gap: Math.abs(p.edge), pick }));
+    }
   }
   const sig = signals(lang, m, outcome);
   if (sig.length) {

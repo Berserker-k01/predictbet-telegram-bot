@@ -64,6 +64,8 @@ const EN = {
   iaLineAway: "AI: slight edge to {team} away.",
   iaLineLevel: "AI: even game.",
   topMarket: "The market points the same way ({pct}%).",
+  marketLine: "Market odds: {home} {hp}% · draw {dp}% · {away} {ap}%.",
+  edgeLine: "Edge vs the market: +{gap} pts on {pick}.",
   sigAiHome: "The AI gives a slight edge to {team} at home.",
   sigAiAway: "The AI gives a slight edge to {team} away.",
   sigAiLevel: "The AI sees a balanced game.",

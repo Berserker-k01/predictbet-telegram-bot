@@ -1,6 +1,6 @@
 import { t } from "./i18n.js";
 import { hydrateMatch, matchScore } from "./format.js";
-import { predictMatch, predictLive } from "./model.js";
+import { predictFixture, predictFixtureLive } from "./engine.js";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -91,7 +91,7 @@ function mix(model, api, apiWeight = 0.22) {
 }
 
 function localModel(match) {
-  return predictMatch(match);
+  return predictFixture(match);
 }
 
 function applyMatchState(match, pred) {
@@ -114,7 +114,7 @@ function applyMatchState(match, pred) {
     };
   }
   if (m.live && score) {
-    return predictLive(m, score, m.minute);
+    return predictFixtureLive(m, score, m.minute);
   }
   return pred;
 }
