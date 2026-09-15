@@ -1,4 +1,6 @@
 import { t } from "./i18n.js";
+import { hydrateMatch, matchScore } from "./format.js";
+import { predictMatch, predictLive } from "./model.js";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -7,20 +9,6 @@ function sleep(ms) {
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-function hashSeed(value) {
-  let h = 2166136261;
-  for (const ch of String(value ?? "")) {
-    h ^= ch.charCodeAt(0);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-function unit(seed, salt) {
-  const x = Math.sin(seed * 0.000001 + salt * 12.9898) * 43758.5453;
-  return x - Math.floor(x);
 }
 
 function asPctTriple(win, draw, loss) {
@@ -55,116 +43,107 @@ function fromBag(bag) {
   );
 }
 
+function isDummyTriple(p) {
+  if (!p) return true;
+  if (p.draw < 15 || p.draw > 38) return true;
+  const spread = Math.max(p.win, p.draw, p.loss) - Math.min(p.win, p.draw, p.loss);
+  if (spread < 6) return true;
+  return false;
+}
+
 export function extractPrediction(...sources) {
   for (const src of sources) {
     if (!src || typeof src !== "object") continue;
     const bags = [
       src.probs,
-      src.predictionPreview,
-      src.prediction,
       src.probabilities,
-      src.odds,
       src.data?.probs,
       src.data?.prediction,
-      src.data?.predictionPreview,
-      src.match?.predictionPreview,
-      src,
+      src.prediction,
+      src.odds,
     ];
     for (const bag of bags) {
       const triple = fromBag(bag);
-      if (triple) {
+      if (triple && !isDummyTriple(triple)) {
         const confidence =
           num(bag?.confidence ?? bag?.pickPct ?? src.confidence ?? src.data?.confidence) ??
           Math.max(triple.win, triple.draw, triple.loss);
-        return { ...triple, confidence: Math.round(Math.min(92, Math.max(48, confidence))) };
+        return { ...triple, confidence: Math.round(Math.min(90, Math.max(50, confidence))) };
       }
     }
   }
   return null;
 }
 
-function isFlat(p) {
-  if (!p) return true;
-  const spread = Math.max(p.win, p.draw, p.loss) - Math.min(p.win, p.draw, p.loss);
-  return spread < 8;
+function mix(model, api, apiWeight = 0.22) {
+  if (!api) return model;
+  const w = 1 - apiWeight;
+  const triple = asPctTriple(
+    model.win * w + api.win * apiWeight,
+    model.draw * w + api.draw * apiWeight,
+    model.loss * w + api.loss * apiWeight,
+  );
+  return {
+    ...model,
+    ...triple,
+    confidence: Math.round(model.confidence * w + (api.confidence || model.confidence) * apiWeight),
+  };
 }
 
 function localModel(match) {
-  const seed = hashSeed(
-    `${match?.id || ""}|${match?.home?.name || ""}|${match?.away?.name || ""}|${match?.leagueId || match?.league || ""}`,
-  );
-  const hxg = num(match?.home?.xg);
-  const axg = num(match?.away?.xg);
-  let home = 0.38 + unit(seed, 1) * 0.22;
-  let away = 0.28 + unit(seed, 2) * 0.2;
-  let draw = 0.22 + unit(seed, 3) * 0.12;
-  home += 0.07 + unit(seed, 4) * 0.05;
-  if (hxg != null && axg != null) {
-    const diff = Math.max(-2.2, Math.min(2.2, hxg - axg));
-    home += diff * 0.08;
-    away -= diff * 0.08;
-    draw += (1.6 - Math.abs(diff)) * 0.03;
+  return predictMatch(match);
+}
+
+function applyMatchState(match, pred) {
+  const m = hydrateMatch(match);
+  const score = matchScore(m);
+  if (m.cancelled) {
+    return { ...pred, win: 0, draw: 0, loss: 0, confidence: 0, score: "", cancelled: true };
   }
-  home = Math.max(0.12, home);
-  away = Math.max(0.1, away);
-  draw = Math.max(0.14, draw);
-  const triple = asPctTriple(home, draw, away);
-  const goals = (hxg ?? 1.2 + unit(seed, 5) * 0.9) + (axg ?? 1.0 + unit(seed, 6) * 0.8);
-  const side = triple.win >= triple.draw && triple.win >= triple.loss ? "home" : triple.loss >= triple.draw ? "away" : "draw";
-  const scores = {
-    home: ["1-0", "2-1", "2-0", "1-0", "2-1"],
-    away: ["0-1", "1-2", "0-1", "1-2", "0-2"],
-    draw: ["1-1", "0-0", "1-1", "2-2", "1-1"],
-  };
-  const score = scores[side][Math.floor(unit(seed, 7) * scores[side].length)];
-  const confidence = Math.round(Math.min(88, Math.max(52, Math.max(triple.win, triple.draw, triple.loss) + unit(seed, 8) * 8)));
-  return {
-    ...triple,
-    confidence,
-    score,
-    open: goals >= 2.45,
-    tightness: Math.max(triple.win, triple.draw, triple.loss) < 46,
-  };
+  if (m.finished) {
+    const winner = !score ? null : score.home > score.away ? "home" : score.away > score.home ? "away" : "draw";
+    return {
+      win: winner === "home" ? 100 : 0,
+      draw: winner === "draw" ? 100 : 0,
+      loss: winner === "away" ? 100 : 0,
+      confidence: score ? 100 : 0,
+      score: score?.text || "",
+      finished: true,
+      open: false,
+      tightness: true,
+    };
+  }
+  if (m.live && score) {
+    return predictLive(m, score, m.minute);
+  }
+  return pred;
 }
 
 export function resolvePrediction(match, ...apiPayloads) {
-  const extracted = extractPrediction(...apiPayloads, match);
-  const local = localModel(match);
-  const useLocal = !extracted || isFlat(extracted);
-  const base = useLocal ? local : extracted;
-  const side =
-    base.win >= base.draw && base.win >= base.loss ? "home" : base.loss >= base.draw ? "away" : "draw";
-  const seed = hashSeed(`${match?.id || ""}|${side}`);
-  const scores = {
-    home: ["1-0", "2-1", "2-0", "1-0", "2-1"],
-    away: ["0-1", "1-2", "0-1", "1-2", "0-2"],
-    draw: ["1-1", "0-0", "1-1", "2-2", "1-1"],
-  };
-  const score = scores[side][Math.floor(unit(seed, 3) * scores[side].length)];
-  return {
-    win: base.win,
-    draw: base.draw,
-    loss: base.loss,
-    confidence: base.confidence ?? local.confidence,
-    score,
-    open: local.open,
-    tightness: Math.max(base.win, base.draw, base.loss) < 46,
-  };
+  const m = hydrateMatch(match);
+  if (m.finished || m.cancelled) {
+    return applyMatchState(m, { win: 0, draw: 0, loss: 0, confidence: 0, score: "" });
+  }
+  const model = localModel(m);
+  const api = extractPrediction(...apiPayloads);
+  const base = api ? mix(model, api) : model;
+  return applyMatchState(m, base);
 }
 
 export function mergeMatchDetail(listed, detail) {
-  if (!detail || typeof detail !== "object") return listed;
-  const inner = detail.match || detail.data || detail;
-  return {
+  if (!detail || typeof detail !== "object") return hydrateMatch(listed);
+  const inner = detail.match || detail.fixture || detail.data?.match || detail.data || detail;
+  return hydrateMatch({
     ...listed,
     ...inner,
-    id: listed.id,
+    id: listed.id || inner.id,
     home: { ...(listed.home || {}), ...(inner.home || {}) },
     away: { ...(listed.away || {}), ...(inner.away || {}) },
-  };
+  });
 }
 
 function signals(lang, m, outcome) {
+  if (m.finished || m.cancelled) return [];
   const p = m.predictionPreview || {};
   const conf = Number(p.confidence);
   const lines = [];
@@ -172,8 +151,8 @@ function signals(lang, m, outcome) {
   const away = m.away?.name || "";
 
   if (Number.isFinite(conf)) {
-    if (conf >= 70) lines.push(t(lang, "sigConfHigh", { conf }));
-    else if (conf >= 55) lines.push(t(lang, "sigConfMid", { conf }));
+    if (conf >= 72) lines.push(t(lang, "sigConfHigh", { conf }));
+    else if (conf >= 58) lines.push(t(lang, "sigConfMid", { conf }));
     else lines.push(t(lang, "sigConfLow", { conf }));
   }
 

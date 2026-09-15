@@ -38,9 +38,24 @@ export function shiftYmd(ymdStr, days) {
 }
 
 export function isLive(m) {
-  if (m?.live) return true;
+  if (m?.live || m?.phase === "live") return true;
   const st = String(m?.status ?? "").toUpperCase();
-  return st === "IN_PLAY" || st === "PAUSED" || st === "LIVE" || st === "HALFTIME";
+  return (
+    st === "IN_PLAY" ||
+    st === "PAUSED" ||
+    st === "LIVE" ||
+    st === "HALFTIME" ||
+    st === "HT" ||
+    st === "1H" ||
+    st === "2H" ||
+    st === "ET"
+  );
+}
+
+export function isFinished(m) {
+  if (m?.finished || m?.phase === "finished") return true;
+  const st = String(m?.status ?? "").toUpperCase();
+  return st === "FINISHED" || st === "AWARDED" || st === "FT" || st === "AET";
 }
 
 export function isToday(m, now = new Date()) {

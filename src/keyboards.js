@@ -67,6 +67,7 @@ export function listKeyboard(lang, slice, page, pages, pageSize) {
 
 export function matchDetailKeyboard(lang, match, { prev, next } = {}) {
   const kb = new InlineKeyboard();
+  if (match?.id) kb.text(t(lang, "btnRefresh"), `r:${match.id}`).row();
   if (prev) kb.text(t(lang, "prevMatch"), `m:${prev.id}`);
   if (next) kb.text(t(lang, "nextMatch"), `m:${next.id}`);
   if (prev || next) kb.row();

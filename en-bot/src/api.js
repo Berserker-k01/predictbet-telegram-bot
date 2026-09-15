@@ -54,6 +54,7 @@ export function createApi(config) {
     matches: (params = {}, extra = {}) => {
       const q = new URLSearchParams();
       if (params.upcoming) q.set("upcoming", "1");
+      if (params.live) q.set("live", "1");
       if (params.date) q.set("date", params.date);
       q.set("category", "football");
       return request(`/api/sports/matches?${q}`, extra);

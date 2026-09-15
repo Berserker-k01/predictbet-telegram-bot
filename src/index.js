@@ -10,6 +10,7 @@ import { createStore } from "./store.js";
 import { createTchin } from "./tchin.js";
 import { startHttpServer } from "./http-server.js";
 import { sleep, signals, resolvePrediction, mergeMatchDetail } from "./analysis.js";
+import { predictMatch } from "./model.js";
 import { t } from "./i18n.js";
 import { resolveStadium, resolveReferee } from "./venues.js";
 import {
@@ -21,6 +22,7 @@ import {
   findMatch,
   pctBar,
   listEntry,
+  hydrateMatch,
 } from "./format.js";
 import {
   filterMatches,
@@ -29,6 +31,7 @@ import {
   neighbors,
   defaultView,
   pickOutcome,
+  ymd,
 } from "./catalog.js";
 import {
   mainKeyboard,
@@ -200,15 +203,58 @@ async function requireSession(ctx) {
   return s;
 }
 
+function mergeMatchRows(into, raw) {
+  const m = hydrateMatch(raw);
+  const id = String(m?.id || m?.externalId || "");
+  if (!id) return;
+  const prev = into.get(id);
+  into.set(
+    id,
+    prev
+      ? hydrateMatch({
+          ...prev,
+          ...m,
+          home: { ...(prev.home || {}), ...(m.home || {}) },
+          away: { ...(prev.away || {}), ...(m.away || {}) },
+        })
+      : m,
+  );
+}
+
+async function fetchMatchBundle(apiUrl) {
+  const today = ymd(new Date());
+  const results = await Promise.allSettled([
+    api.matches({ upcoming: true }, { apiUrl }),
+    api.matches({ date: today }, { apiUrl }),
+    api.matches({ live: true }, { apiUrl }),
+  ]);
+  const map = new Map();
+  let lastError = null;
+  let anyOk = false;
+  for (const r of results) {
+    if (r.status !== "fulfilled") {
+      lastError = r.reason;
+      continue;
+    }
+    anyOk = true;
+    for (const raw of extractMatches(r.value)) mergeMatchRows(map, raw);
+  }
+  if (!anyOk) throw lastError || new Error("matches injoignable");
+  return upcoming([...map.values()]).map((m) => {
+    if (m.finished || m.cancelled) return m;
+    return { ...m, predictionPreview: predictMatch(m) };
+  });
+}
+
 async function loadUpcoming(force = false) {
-  if (!force && matchCache.list.length && Date.now() - matchCache.at < config.cacheMs) {
+  const ttl = matchCache.list.some((m) => m.live) ? 12_000 : config.cacheMs;
+  if (!force && matchCache.list.length && Date.now() - matchCache.at < ttl) {
     return matchCache.list;
   }
   let lastError = null;
   for (const apiUrl of apiUrlFallbacks(config.apiUrl)) {
     try {
-      const data = await api.matches({ upcoming: true }, { apiUrl });
-      const list = upcoming(extractMatches(data));
+      const list = await fetchMatchBundle(apiUrl);
       if (apiUrl !== config.apiUrl) {
         config.apiUrl = apiUrl;
         console.warn(`API matchs via ${apiUrl} (${list.length})`);
@@ -328,35 +374,54 @@ function analysisBlock(lang, m, extraMarkets = "") {
   const away = esc(m.away?.name || "");
   const outcome = pickOutcome(m);
   const conf = p.confidence ?? "—";
-  let sentence = t(lang, "predNone");
-  if (outcome?.side === "home") {
-    sentence = t(lang, "predHome", { team: home, pct: outcome.pct, conf });
-  } else if (outcome?.side === "draw") {
-    sentence = t(lang, "predDraw", { pct: outcome.pct, conf });
-  } else if (outcome?.side === "away") {
-    sentence = t(lang, "predAway", { team: away, pct: outcome.pct, conf });
+  const score = esc(m.scoreText || p.score || "—");
+
+  if (m.cancelled) {
+    return [t(lang, "analysisTitle"), t(lang, "predCancelled")].join("\n");
   }
 
-  const lines = [
-    t(lang, "analysisTitle"),
-    sentence,
-  ];
-  if (p.score) lines.push(t(lang, "predScore", { score: esc(p.score) }));
+  if (m.finished) {
+    return [
+      t(lang, "analysisTitle"),
+      t(lang, "predFt", { home, away, score }),
+      "",
+      `${home}  ${p.win ?? "—"}%  ${pctBar(p.win)}`,
+      `${t(lang, "drawLabel")}  ${p.draw ?? "—"}%  ${pctBar(p.draw)}`,
+      `${away}  ${p.loss ?? "—"}%  ${pctBar(p.loss)}`,
+    ].join("\n");
+  }
+
+  let sentence = t(lang, "predNone");
+  const vals = [Number(p.win) || 0, Number(p.draw) || 0, Number(p.loss) || 0];
+  const maxp = Math.max(...vals);
+  const gap = maxp - [...vals].sort((a, b) => b - a)[1];
+  if (maxp >= 40 || gap >= 6) {
+    if (outcome?.side === "home") {
+      sentence = t(lang, "predHome", { team: home, pct: outcome.pct, conf });
+    } else if (outcome?.side === "draw") {
+      sentence = t(lang, "predDraw", { pct: outcome.pct, conf });
+    } else if (outcome?.side === "away") {
+      sentence = t(lang, "predAway", { team: away, pct: outcome.pct, conf });
+    }
+  }
+
+  const lines = [t(lang, "analysisTitle")];
+  if (m.live) {
+    lines.push(t(lang, "predLiveHead", { clock: esc(m.clock || "LIVE"), score }));
+  }
+  lines.push(sentence);
+  if (p.score) {
+    lines.push(t(lang, m.live ? "predScoreLive" : "predScore", { score: esc(p.score) }));
+  }
   lines.push(
     "",
     `${home}  ${p.win ?? "—"}%  ${pctBar(p.win)}`,
     `${t(lang, "drawLabel")}  ${p.draw ?? "—"}%  ${pctBar(p.draw)}`,
     `${away}  ${p.loss ?? "—"}%  ${pctBar(p.loss)}`,
   );
-  const hxg = Number(m.home?.xg);
-  const axg = Number(m.away?.xg);
-  if (Number.isFinite(hxg) && Number.isFinite(axg)) {
-    let iaLine = t(lang, "iaLineLevel");
-    if (hxg > axg + 0.15) iaLine = t(lang, "iaLineHome", { team: home });
-    else if (axg > hxg + 0.15) iaLine = t(lang, "iaLineAway", { team: away });
-    lines.push("", iaLine);
+  if (p.topMarket != null && Number(p.topMarket) !== 73) {
+    lines.push(t(lang, "topMarket", { pct: p.topMarket }));
   }
-  if (p.topMarket != null) lines.push(t(lang, "topMarket", { pct: p.topMarket }));
   const sig = signals(lang, m, outcome);
   if (sig.length) {
     lines.push("", t(lang, "aiSignals"), ...sig.map((s) => `• ${esc(s)}`));
@@ -410,7 +475,7 @@ async function showList(ctx, patch = {}) {
     sort: patch.sort ?? prev.sort ?? "time",
     page: patch.page ?? (patch.scope || patch.league !== undefined || patch.sort ? 0 : prev.page),
   });
-  const all = await loadUpcoming();
+  const all = await loadUpcoming(view.scope === "live");
   if (!all.length && matchCache.error) {
     await editOrReply(ctx, t(lang, "matchesLoadError"), menuKeyboard(lang));
     return;
@@ -444,7 +509,7 @@ async function showList(ctx, patch = {}) {
   await editOrReply(ctx, text, listKeyboard(lang, slice, p, pages, config.pageSize));
 }
 
-async function showMatch(ctx, id) {
+async function showMatch(ctx, id, { refresh = false } = {}) {
   if (!(await requireLogin(ctx))) return;
   const lang = langOf(ctx);
   trackUser(ctx);
@@ -453,7 +518,7 @@ async function showMatch(ctx, id) {
     return;
   }
   const s = await requireSession(ctx);
-  const all = await loadUpcoming();
+  const all = await loadUpcoming(true);
   const current = getView(ctx);
   const from = current.screen === "match" ? current.from : current.screen;
   const browseView = {
@@ -464,40 +529,51 @@ async function showMatch(ctx, id) {
     league: current.league,
   };
   const pool = browseList(all, browseView);
-  const listed = findMatch(pool, id).match || findMatch(all, id).match;
+  let listed = findMatch(pool, id).match || findMatch(all, id).match;
+  if (!listed) {
+    try {
+      const detail = await api.matchDetail(id, s.token || undefined);
+      listed = mergeMatchDetail({ id }, detail);
+    } catch {
+      listed = null;
+    }
+  }
   if (!listed) {
     await ctx.reply(t(lang, "noMatches"), { parse_mode: "HTML" });
     return;
   }
-  let match = {
+  let match = hydrateMatch({
     ...listed,
     home: listed.home,
     away: listed.away,
     predictionPreview: listed.predictionPreview ? { ...listed.predictionPreview } : {},
-  };
+  });
   setView(ctx, { screen: "match", matchId: listed.id, from: from || "list" });
 
-  if (ctx.callbackQuery) {
+  const thinkKey = match.live ? "aiThinkingLive" : "aiThinking";
+  const thinkText = t(lang, thinkKey, {
+    home: esc(match.home?.name),
+    away: esc(match.away?.name),
+  });
+  let thinkingId;
+  if (refresh && ctx.callbackQuery?.message) {
     try {
-      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(thinkText, { parse_mode: "HTML" });
+      thinkingId = ctx.callbackQuery.message.message_id;
     } catch {
-      /* */
+      const thinking = await ctx.reply(thinkText, { parse_mode: "HTML" });
+      thinkingId = thinking.message_id;
     }
+  } else {
+    const thinking = await ctx.reply(thinkText, { parse_mode: "HTML" });
+    thinkingId = thinking.message_id;
   }
-
-  const thinking = await ctx.reply(
-    t(lang, "aiThinking", {
-      home: esc(match.home?.name),
-      away: esc(match.away?.name),
-    }),
-    { parse_mode: "HTML" },
-  );
   try {
     await ctx.api.sendChatAction(ctx.chat.id, "typing");
   } catch {
     /* */
   }
-  await sleep(800 + Math.floor(Math.random() * 500));
+  await sleep(refresh ? 280 : 800 + Math.floor(Math.random() * 500));
 
   let extra = "";
   try {
@@ -518,7 +594,7 @@ async function showMatch(ctx, id) {
   } catch (e) {
     if (e instanceof ApiError && (e.status === 402 || e.code === "INSUFFICIENT_CREDITS")) {
       try {
-        await ctx.api.editMessageText(ctx.chat.id, thinking.message_id, t(lang, "creditsLow"), {
+        await ctx.api.editMessageText(ctx.chat.id, thinkingId, t(lang, "creditsLow"), {
           parse_mode: "HTML",
         });
       } catch {
@@ -528,15 +604,15 @@ async function showMatch(ctx, id) {
     }
     match.predictionPreview = resolvePrediction(match);
   }
-  if (!match.predictionPreview?.win && !match.predictionPreview?.draw) {
+  if (!match.predictionPreview?.win && !match.predictionPreview?.draw && !match.finished && !match.cancelled) {
     match.predictionPreview = resolvePrediction(match);
   }
 
   const text = `${t(lang, "stepAnalysis")}${matchCard(lang, match)}\n\n${analysisBlock(lang, match, extra)}`;
   const nav = neighbors(pool.length ? pool : all, listed.id);
-  const markup = matchDetailKeyboard(lang, listed, { prev: nav.prev, next: nav.next });
+  const markup = matchDetailKeyboard(lang, match, { prev: nav.prev, next: nav.next });
   try {
-    await ctx.api.editMessageText(ctx.chat.id, thinking.message_id, text, {
+    await ctx.api.editMessageText(ctx.chat.id, thinkingId, text, {
       parse_mode: "HTML",
       reply_markup: markup,
     });
@@ -802,6 +878,8 @@ bot.on("callback_query:data", async (ctx) => {
   const lang = langOf(ctx);
   if (data.startsWith("m:")) {
     await ctx.answerCallbackQuery({ text: t(lang, "toastOpen") });
+  } else if (data.startsWith("r:")) {
+    await ctx.answerCallbackQuery({ text: t(lang, "toastRefresh") });
   } else {
     await ctx.answerCallbackQuery();
   }
@@ -837,6 +915,7 @@ bot.on("callback_query:data", async (ctx) => {
     if (data.startsWith("pg:")) {
       return void (await showList(ctx, { page: Number(data.slice(3)) || 0 }));
     }
+    if (data.startsWith("r:")) return void (await showMatch(ctx, data.slice(2), { refresh: true }));
     if (data.startsWith("m:")) return void (await showMatch(ctx, data.slice(2)));
     if (data === "notif") {
       const s = sess(ctx);

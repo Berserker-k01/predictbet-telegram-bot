@@ -21,29 +21,231 @@ function kickoffIso(m) {
   return raw || "";
 }
 
-const DONE = new Set(["FINISHED", "AWARDED", "CANCELLED", "CANCELED", "ABANDONED"]);
-const LIVE = new Set(["IN_PLAY", "PAUSED", "LIVE", "HALFTIME"]);
+const DONE = new Set([
+  "FINISHED",
+  "AWARDED",
+  "FT",
+  "AET",
+  "FULL_TIME",
+  "ENDED",
+  "COMPLETE",
+  "COMPLETED",
+]);
+const LIVE = new Set([
+  "IN_PLAY",
+  "PAUSED",
+  "LIVE",
+  "HALFTIME",
+  "HT",
+  "1H",
+  "2H",
+  "ET",
+  "BT",
+  "P",
+  "INT",
+  "BREAK",
+  "EXTRA_TIME",
+  "PENALTIES",
+]);
+const CANCEL = new Set([
+  "CANCELLED",
+  "CANCELED",
+  "ABANDONED",
+  "POSTPONED",
+  "SUSPENDED",
+  "PST",
+  "CANC",
+  "ABD",
+]);
 const KICKOFF_GRACE_MS = 3 * 60 * 60 * 1000;
+const FINISHED_KEEP_MS = 4 * 60 * 60 * 1000;
+const LIVE_MAX_MS = 2.5 * 60 * 60 * 1000;
 
-function stillUpcoming(m, nowMs) {
-  const st = String(m.status ?? "").toUpperCase();
-  if (DONE.has(st)) return false;
-  if (m.live || LIVE.has(st)) return true;
+function numFirst(...vals) {
+  for (const v of vals) {
+    if (v == null || v === "") continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function parseScoreText(s) {
+  const m = String(s || "").match(/(\d+)\s*[-–:]\s*(\d+)/);
+  if (!m) return null;
+  return { home: Number(m[1]), away: Number(m[2]) };
+}
+
+function unwrapMatch(raw) {
+  if (!raw || typeof raw !== "object") return raw;
+  const inner = raw.match || raw.fixture || raw.data?.match || raw.data?.fixture || raw.data || raw;
+  if (inner.teams && (inner.fixture || inner.goals)) {
+    const fx = inner.fixture || {};
+    const st = fx.status || {};
+    return {
+      ...inner,
+      id: fx.id || inner.id,
+      dateIso: fx.date || inner.dateIso,
+      status: st.short || st.long || inner.status,
+      minute: st.elapsed ?? inner.minute,
+      injuryTime: st.extra ?? inner.injuryTime,
+      home: {
+        ...(inner.home || {}),
+        name: inner.teams?.home?.name || inner.home?.name,
+        score: inner.goals?.home ?? inner.home?.score,
+      },
+      away: {
+        ...(inner.away || {}),
+        name: inner.teams?.away?.name || inner.away?.name,
+        score: inner.goals?.away ?? inner.away?.score,
+      },
+      league: inner.league?.name || inner.league,
+      leagueId: inner.league?.id || inner.leagueId,
+      goals: inner.goals,
+      score: inner.score,
+    };
+  }
+  return inner;
+}
+
+export function matchScore(m) {
+  if (!m || typeof m !== "object") return null;
+  const scoreObj = typeof m.score === "object" && m.score ? m.score : null;
+  const parsed = parseScoreText(
+    m.scoreText || m.ftScore || m.result || (typeof m.score === "string" ? m.score : ""),
+  );
+  const h = numFirst(
+    parsed?.home,
+    m.homeScore,
+    m.homeGoals,
+    m.goalsHome,
+    m.home?.score,
+    m.home?.goals,
+    m.home?.goal,
+    scoreObj?.home,
+    scoreObj?.homeTeam,
+    scoreObj?.fullTime?.home,
+    scoreObj?.fullTime?.homeTeam,
+    scoreObj?.current?.home,
+    m.goals?.home,
+    m.fullTime?.home,
+    m.ft?.home,
+  );
+  const a = numFirst(
+    parsed?.away,
+    m.awayScore,
+    m.awayGoals,
+    m.goalsAway,
+    m.away?.score,
+    m.away?.goals,
+    m.away?.goal,
+    scoreObj?.away,
+    scoreObj?.awayTeam,
+    scoreObj?.fullTime?.away,
+    scoreObj?.fullTime?.awayTeam,
+    scoreObj?.current?.away,
+    m.goals?.away,
+    m.fullTime?.away,
+    m.ft?.away,
+  );
+  if (h == null || a == null) return null;
+  return { home: h, away: a, text: `${h}–${a}` };
+}
+
+export function matchMinute(m, now = new Date()) {
+  const min = numFirst(
+    m?.minute,
+    m?.elapsed,
+    m?.clock,
+    m?.time?.elapsed,
+    m?.time?.minute,
+    m?.statusMinute,
+    m?.matchMinute,
+    typeof m?.status === "object" ? m.status?.elapsed : null,
+  );
+  if (min != null) return min;
+  const t = new Date(m?.dateIso || 0).getTime();
+  if (!Number.isFinite(t) || t <= 0) return null;
+  const elapsed = Math.floor((now.getTime() - t) / 60_000);
+  if (elapsed < 0 || elapsed > 130) return null;
+  return elapsed;
+}
+
+export function matchClock(m, now = new Date()) {
+  const st = String(m?.status ?? "").toUpperCase();
+  if (st === "HALFTIME" || st === "PAUSED" || st === "HT" || st === "BREAK") return "MT";
+  const min = matchMinute(m, now);
+  if (min == null) return "";
+  const extra = numFirst(m?.injuryTime, m?.addedTime, m?.time?.extra, m?.minuteExtra);
+  return extra ? `${min}+${extra}'` : `${min}'`;
+}
+
+export function matchPhase(m, now = new Date()) {
+  const st = String(m?.status ?? "").toUpperCase();
+  if (CANCEL.has(st)) return "cancelled";
+  if (DONE.has(st) || m?.finished) return "finished";
+  if (m?.live || LIVE.has(st)) return "live";
+  const t = new Date(m?.dateIso || 0).getTime();
+  if (!Number.isFinite(t) || t <= 0) return "upcoming";
+  const elapsed = now.getTime() - t;
+  if (elapsed > LIVE_MAX_MS) return "finished";
+  if (elapsed > 60_000) return "live";
+  return "upcoming";
+}
+
+export function hydrateMatch(raw, now = new Date()) {
+  const m = unwrapMatch(raw);
+  if (!m || typeof m !== "object") return m;
+  const dateIso = kickoffIso(m) || m.dateIso;
+  let status = m.status;
+  let minute = m.minute;
+  if (status && typeof status === "object") {
+    minute = minute ?? status.elapsed;
+    status = status.short || status.long || status.type || "";
+  }
+  const st = String(status ?? "");
+  if (/^\d{4}-\d{2}-\d{2}/.test(st)) status = "TIMED";
+  const base = { ...m, dateIso, status, minute };
+  const score = matchScore(base);
+  const phase = matchPhase(base, now);
+  const clock = matchClock(base, now);
+  const live = phase === "live";
+  const finished = phase === "finished";
+  if (live && (!status || ["TIMED", "SCHEDULED", "NS", "NOT_STARTED"].includes(String(status).toUpperCase()))) {
+    status = "IN_PLAY";
+  }
+  if (finished && (!status || ["TIMED", "SCHEDULED", "NS", "IN_PLAY", "LIVE"].includes(String(status).toUpperCase()))) {
+    status = "FINISHED";
+  }
+  return {
+    ...base,
+    status,
+    live,
+    finished,
+    cancelled: phase === "cancelled",
+    phase,
+    homeScore: score?.home ?? base.homeScore,
+    awayScore: score?.away ?? base.awayScore,
+    scoreText: score?.text || "",
+    clock,
+    minute: matchMinute(base, now),
+  };
+}
+
+function stillVisible(m, nowMs) {
+  if (m.cancelled || m.phase === "cancelled") return false;
+  if (m.live || m.phase === "live") return true;
   const t = new Date(m.dateIso || 0).getTime();
   if (!Number.isFinite(t) || t <= 0) return false;
+  if (m.finished || m.phase === "finished") return nowMs - t < FINISHED_KEEP_MS;
   return t + KICKOFF_GRACE_MS > nowMs;
 }
 
 export function upcoming(matches = [], now = new Date()) {
   const nowMs = now.getTime();
   return matches
-    .map((m) => {
-      const dateIso = kickoffIso(m) || m.dateIso;
-      const st = String(m.status ?? "");
-      const status = /^\d{4}-\d{2}-\d{2}/.test(st) ? "TIMED" : m.status;
-      return { ...m, dateIso, status };
-    })
-    .filter((m) => stillUpcoming(m, nowMs))
+    .map((m) => hydrateMatch(m, now))
+    .filter((m) => stillVisible(m, nowMs))
     .sort((a, b) => new Date(a.dateIso || 0) - new Date(b.dateIso || 0));
 }
 
@@ -75,7 +277,10 @@ export function pickLabel(m, langPick) {
 }
 
 export function whenText(m, lang = "fr") {
-  if (m.live) return "LIVE";
+  if (m.finished) return m.scoreText ? `FT ${m.scoreText}` : "FT";
+  if (m.live) {
+    return ["LIVE", m.clock, m.scoreText].filter(Boolean).join(" ");
+  }
   const iso = m.dateIso;
   if (!iso) return `${m.date ?? ""} ${m.time ?? ""}`.trim();
   const d = new Date(iso);
@@ -95,7 +300,8 @@ export function pctBar(pct) {
 }
 
 export function timeShort(m, lang = "fr") {
-  if (m.live) return "LIVE";
+  if (m.finished) return m.scoreText ? `FT ${m.scoreText}` : "FT";
+  if (m.live) return ["LIVE", m.clock, m.scoreText].filter(Boolean).join(" ");
   if (!m.dateIso) return m.time || "";
   const d = new Date(m.dateIso);
   return d.toLocaleTimeString(LOCALES[lang] || LOCALES.fr, {
@@ -114,8 +320,7 @@ export function matchLine(m, { locked, liveLabel, pick } = {}) {
 }
 
 export function listEntry(m, n, lang, whenTextFn) {
-  const live = m.live ? "  ⚡️ LIVE" : "";
-  return `${n}. <b>${esc(m.home?.name)} vs ${esc(m.away?.name)}</b>${live}\n    🏆 ${esc(m.league || "")} · ${esc(whenTextFn(m, lang))}`;
+  return `${n}. <b>${esc(m.home?.name)} vs ${esc(m.away?.name)}</b>\n    🏆 ${esc(m.league || "")} · ${esc(whenTextFn(m, lang))}`;
 }
 
 export function paginate(list, page, size) {
